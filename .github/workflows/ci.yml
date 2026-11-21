@@ -1,0 +1,94 @@
+name: Muffin CI & APK
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: muffin-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-bench-apk:
+    name: Test, HotSpot Benchmark & Dual-ABI APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout Muffin
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup Temurin Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Cache Mojo 1.2 & Shizuku/Muffin Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/mojo-venv
+            ~/.cache/muffin
+          key: ${{ runner.os }}-mojo120-py312-v1
+
+      - name: Install Mojo 1.2.0
+        run: |
+          if [ ! -x "$HOME/.cache/mojo-venv/bin/mojo" ]; then
+            python3 -m venv "$HOME/.cache/mojo-venv"
+            "$HOME/.cache/mojo-venv/bin/pip" install --upgrade pip
+            "$HOME/.cache/mojo-venv/bin/pip" install mojo==1.2.0
+          fi
+          echo "$HOME/.cache/mojo-venv/bin" >> "$GITHUB_PATH"
+          "$HOME/.cache/mojo-venv/bin/mojo" --version
+
+      - name: Verify Android SDK & NDK
+        run: |
+          SDK_DIR="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          echo "ANDROID_HOME=$SDK_DIR" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_DIR" >> "$GITHUB_ENV"
+          if [ ! -d "$SDK_DIR/ndk" ] || [ -z "$(ls -A "$SDK_DIR/ndk" 2>/dev/null)" ]; then
+            yes | "$SDK_DIR/cmdline-tools/latest/bin/sdkmanager" "ndk;28.2.13676358" "platforms;android-34" "build-tools;34.0.0"
+          fi
+          ls -la "$SDK_DIR/ndk"
+
+      - name: Install Native Runtime Libs (Vulkan/GL/OpenAL/Zlib)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libvulkan1 libgl1 libopenal1 zlib1g binutils
+
+      - name: Run Full Test Suite (E2E + Runtime + APK)
+        run: python3 -m unittest discover -s tests -v
+
+      - name: Run OpenJDK 21 HotSpot vs Muffin Mojo 1.2 Benchmarks
+        run: |
+          python3 tools/bench_muffin.py | tee bench_report.txt
+          {
+            echo "## Muffin Native (Mojo 1.2 Zero-GC) vs OpenJDK 21 HotSpot"
+            echo '```text'
+            tail -n 30 bench_report.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build & Verify Muffin Android Launcher APK
+        run: |
+          python3 -m tools.muffin apk
+          ls -lh releases/Muffin-Minecraft-Mojo-Edition.apk
+
+      - name: Upload Signed Android APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Muffin-Minecraft-Mojo-Edition-apk
+          path: releases/Muffin-Minecraft-Mojo-Edition.apk
+          if-no-files-found: error
+          retention-days: 14

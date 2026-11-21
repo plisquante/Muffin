@@ -54,9 +54,14 @@ python3 -m tools.muffin translate -o work/out/shards --shards 16
 # 4. Android Launcher APK derle (arm64-v8a + x86_64, Mojo 1.2 + NDK)
 python3 -m tools.muffin apk
 
-# 5. Diferansiyel testler & HotSpot vs Muffin benchmark
+# 5. Minecraft çekirdek/tam sınıfları paralel shard ile Android ARM64 .so olarak derle (CI/yüksek RAM)
+python3 -m tools.muffin build-lib --shards 32 --jobs 4 --target-triple aarch64-unknown-linux-android26 -o work/out/mc_so
+
+# 6. Diferansiyel testler & HotSpot vs Muffin benchmark
 python3 -m unittest discover -s tests -v
 python3 tools/bench_muffin.py
 ```
+
+Otomatik CI (`.github/workflows/ci.yml`) ve yüksek RAM/CPU Actions derleme hattı (`.github/workflows/build-minecraft.yml`) ile bulutta APK + ARM64 `.so` artefaktları üretilebilir.
 
 Ayrıntılı teknik raporlar: [docs/RESEARCH.md](docs/RESEARCH.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/BENCHMARK.md](docs/BENCHMARK.md).

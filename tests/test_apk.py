@@ -64,6 +64,46 @@ class MuffinApkTest(unittest.TestCase):
                     ):
                         self.assertIn(req, syms, f"missing {req} in {abi}")
 
+    def test_build_lib_arm64_sharded_so(self) -> None:
+        from tools.build_apk import _find_ndk_bin
+
+        if not (shutil.which("javac") and (shutil.which("mojo") or Path("/tmp/mojoenv/bin/mojo").exists())):
+            self.skipTest("javac or mojo not found")
+        try:
+            ndk_bin = _find_ndk_bin()
+        except FileNotFoundError as exc:
+            self.skipTest(str(exc))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            src = t / "src" / "demo"
+            cls = t / "classes"
+            out = t / "out_so"
+            src.mkdir(parents=True)
+            cls.mkdir()
+            (src / "Helper.java").write_text("package demo; public final class Helper { public static int add(int a, int b) { return a + b; } }")
+            (src / "Main.java").write_text("package demo; public class Main { public static void main(String[] args) { System.out.println(Helper.add(20, 22)); } }")
+            subprocess.run(["javac", "-d", str(cls), str(src / "Helper.java"), str(src / "Main.java")], check=True)
+
+            subprocess.run(
+                [
+                    "python3", "-m", "tools.muffin", "build-lib",
+                    "-i", str(cls), "-o", str(out),
+                    "--entry", "demo.Main", "--shards", "2", "--jobs", "2",
+                    "--target-triple", "aarch64-unknown-linux-android26",
+                    "--name", "libtest_mc.so",
+                ],
+                cwd=REPO_ROOT,
+                check=True,
+            )
+            so_file = out / "libtest_mc.so"
+            self.assertTrue(so_file.is_file())
+            hdr = subprocess.check_output([str(ndk_bin / "llvm-readelf"), "-h", str(so_file)], text=True)
+            self.assertIn("AArch64", hdr)
+            syms = subprocess.check_output([str(ndk_bin / "llvm-nm"), "-D", str(so_file)], text=True)
+            self.assertIn("mc_android_entry", syms)
+            self.assertIn("j2z_android_entry", syms)
+
 
 if __name__ == "__main__":
     unittest.main()

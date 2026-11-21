@@ -137,15 +137,22 @@ def cmd_translate(args: argparse.Namespace) -> int:
 
 def cmd_rta(args: argparse.Namespace) -> int:
     """Run closed-world Rapid Type Analysis across client.jar + libraries + JDK."""
+    import os
+
     from .classpath import ClassPath
     from .rta import run_rta
 
     jar = Path(args.jar) if args.jar else _default_jar()
     libs = sorted(str(p) for p in (WORK / "libraries").rglob("*.jar"))
     entries: list[str] = [str(jar), *libs]
-    jmod = Path("/usr/lib/jvm/java-21-openjdk-amd64/jmods/java.base.jmod")
+    jmod_cands = []
+    if os.environ.get("JAVA_HOME"):
+        jmod_cands.append(Path(os.environ["JAVA_HOME"]) / "jmods" / "java.base.jmod")
+    jmod_cands.extend(sorted(Path("/usr/lib/jvm").glob("*/jmods/java.base.jmod"), reverse=True))
+    jmod_cands.append(Path("/usr/lib/jvm/java-21-openjdk-amd64/jmods/java.base.jmod"))
+    jmod = next((p for p in jmod_cands if p.is_file()), None)
     boot_start = len(entries)
-    if jmod.exists():
+    if jmod is not None:
         entries.append(str(jmod))
     cp = ClassPath(entries, boot_start=boot_start)
     res = run_rta(cp, args.entry)
@@ -164,6 +171,61 @@ def cmd_apk(args: argparse.Namespace) -> int:
 
     out = Path(args.out) if args.out else DEFAULT_OUT_APK
     build_apk(out.resolve())
+    return 0
+
+
+def cmd_build_lib(args: argparse.Namespace) -> int:
+    """Translate Java classes into sharded Mojo and compile a 16KB-aligned Android `.so`."""
+    from tools.build_apk import _find_mojo, _find_ndk_bin
+
+    from .classfile import parse_class
+    from .hierarchy import Hierarchy
+    from .indy import IndyDesugarer
+    from .shard import compile_sharded_shared_lib, emit_sharded_project
+
+    src = Path(args.input) if args.input else _default_jar()
+    cfs = []
+    if src.is_dir():
+        for p in sorted(src.rglob("*.class")):
+            cfs.append(parse_class(p.read_bytes()))
+    else:
+        prefixes = tuple(p.replace(".", "/") for p in (args.filter or []))
+        with zipfile.ZipFile(src) as z:
+            for n in z.namelist():
+                if not n.endswith(".class") or n.startswith("META-INF/"):
+                    continue
+                if prefixes and not n.startswith(prefixes):
+                    continue
+                cfs.append(parse_class(z.read(n)))
+
+    des = IndyDesugarer()
+    for cf in cfs:
+        des.rewrite_class(cf)
+    cfs.extend(des.synthetic_classes)
+
+    h = Hierarchy.build(cfs)
+    entry = args.entry.replace(".", "/") if args.entry else None
+    out_dir = Path(args.out)
+    shard_dir = out_dir / "shards"
+    stats, _ = emit_sharded_project(h, shard_dir, shards=args.shards, entry_class=entry, shared_lib=True)
+    print(
+        f"[muffin] emitted {args.shards} shards in {shard_dir}: {stats.classes_emitted} classes, "
+        f"{stats.methods_emitted} methods"
+    )
+
+    ndk_bin = _find_ndk_bin()
+    clang_name = "x86_64-linux-android26-clang" if "x86_64" in args.target_triple else "aarch64-linux-android26-clang"
+    so_out = out_dir / args.name
+    compile_sharded_shared_lib(
+        shard_dir,
+        REPO_ROOT,
+        _find_mojo(),
+        str(ndk_bin / clang_name),
+        so_out,
+        target_triple=args.target_triple,
+        jobs=args.jobs,
+    )
+    print(f"[muffin] built Android shared library -> {so_out} ({so_out.stat().st_size / 1024:.1f} KiB)")
     return 0
 
 
@@ -195,6 +257,16 @@ def main(argv: list[str] | None = None) -> int:
     k = sub.add_parser("apk", help="build dual-ABI Mojo Edition Android Launcher APK")
     k.add_argument("--out", help="output .apk path (default: releases/Muffin-Minecraft-Mojo-Edition.apk)")
     k.set_defaults(fn=cmd_apk)
+    b = sub.add_parser("build-lib", help="compile sharded Mojo project into Android .so via NDK")
+    b.add_argument("--input", "-i", help="jar file or directory of .class files (default: current client.jar)")
+    b.add_argument("--out", "-o", required=True, help="output directory")
+    b.add_argument("--entry", help="optional Java main class")
+    b.add_argument("--filter", action="append", help="only include classes matching prefix")
+    b.add_argument("--shards", type=int, default=8, help="number of parallel Mojo shards")
+    b.add_argument("--jobs", "-j", type=int, default=None, help="parallel Mojo compile workers")
+    b.add_argument("--target-triple", default="aarch64-unknown-linux-android26", help="Mojo LLVM target triple")
+    b.add_argument("--name", default="libminecraft_muffin.so", help="output shared library filename")
+    b.set_defaults(fn=cmd_build_lib)
     args = ap.parse_args(argv)
     return args.fn(args)
 

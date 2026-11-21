@@ -14,8 +14,10 @@ plus `shared.mojo` and `main.mojo`:
 
 from __future__ import annotations
 
+import os
 import subprocess
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .classfile import Member
@@ -40,10 +42,11 @@ def emit_sharded_project(
     *,
     shards: int = 8,
     entry_class: str | None = None,
+    shared_lib: bool = False,
 ) -> tuple[CodegenStats, list[Path]]:
     """Emit `shared.mojo`, `shard_XX.mojo`, and `main.mojo` into `out_dir`."""
     out_dir.mkdir(parents=True, exist_ok=True)
-    if shards <= 1 or len(hierarchy.classes) <= 1:
+    if (shards <= 1 or len(hierarchy.classes) <= 1) and not shared_lib:
         code, stats = emit_mojo_program(hierarchy, entry_class=entry_class)
         main_p = out_dir / "main.mojo"
         main_p.write_text(code)
@@ -130,7 +133,7 @@ def emit_sharded_project(
     _emit_runtime_imports(mw)
     mw(shared_import)
     mw("")
-    mw("def main() raises:")
+    mw("def _run_muffin_entry() raises:")
     mw("    var statics = alloc_raw[JStatics]()")
     mw("    statics.unsafe_write(JStatics())")
     for cname in sorted(hierarchy.classes):
@@ -153,6 +156,23 @@ def emit_sharded_project(
     mw("    statics.unsafe_deinit_pointee()")
     mw("    free_raw(statics)")
     mw("")
+    if shared_lib:
+        mw('@export("mc_android_entry")')
+        mw('def _mc_android_entry() abi("C") -> Int32:')
+        mw("    try:")
+        mw("        _run_muffin_entry()")
+        mw("        return 0")
+        mw("    except:")
+        mw("        return -1")
+        mw("")
+        mw('@export("j2z_android_entry")')
+        mw('def _j2z_android_entry() abi("C") -> Int32:')
+        mw("    return _mc_android_entry()")
+        mw("")
+    else:
+        mw("def main() raises:")
+        mw("    _run_muffin_entry()")
+        mw("")
 
     main_path = out_dir / "main.mojo"
     main_path.write_text("\n".join(m_out))
@@ -160,25 +180,70 @@ def emit_sharded_project(
     return stats, shard_paths
 
 
+def _compile_obj(mojo_bin: str, repo_root: Path, out_dir: Path, src: Path, target_triple: str | None = None) -> Path:
+    obj = src.with_suffix(".o")
+    cmd = [mojo_bin, "build", "--emit", "object"]
+    if target_triple:
+        cmd.extend(["--target-triple", target_triple])
+    cmd.extend(["-I", str(repo_root), "-I", str(out_dir), str(src), "-o", str(obj)])
+    subprocess.run(cmd, check=True)
+    return obj
+
+
 def compile_sharded(
     out_dir: Path,
     repo_root: Path,
     mojo_bin: str,
     exe_path: Path,
+    *,
+    jobs: int | None = None,
+    target_triple: str | None = None,
 ) -> None:
-    """Compile each `shard_XX.mojo` to `.o` and link with `main.mojo`."""
+    """Compile each `shard_XX.mojo` to `.o` in parallel and link with `main.mojo`."""
     shard_files = sorted(out_dir.glob("shard_*.mojo"))
-    obj_files: list[Path] = []
-    for sf in shard_files:
-        of = sf.with_suffix(".o")
-        subprocess.run(
-            [mojo_bin, "build", "--emit", "object", "-I", str(repo_root), "-I", str(out_dir), str(sf), "-o", str(of)],
-            check=True,
-        )
-        obj_files.append(of)
+    workers = max(1, jobs or min(len(shard_files), os.cpu_count() or 2))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        obj_files = list(ex.map(lambda sf: _compile_obj(mojo_bin, repo_root, out_dir, sf, target_triple), shard_files))
 
-    cmd = [mojo_bin, "build", "-I", str(repo_root), "-I", str(out_dir), str(out_dir / "main.mojo")]
+    cmd = [mojo_bin, "build"]
+    if target_triple:
+        cmd.extend(["--target-triple", target_triple])
+    cmd.extend(["-I", str(repo_root), "-I", str(out_dir), str(out_dir / "main.mojo")])
     for of in obj_files:
         cmd.extend(["-Xlinker", str(of)])
     cmd.extend(["-o", str(exe_path)])
     subprocess.run(cmd, check=True)
+
+
+def compile_sharded_shared_lib(
+    out_dir: Path,
+    repo_root: Path,
+    mojo_bin: str,
+    ndk_clang: str,
+    so_path: Path,
+    *,
+    target_triple: str = "aarch64-unknown-linux-android26",
+    jobs: int | None = None,
+) -> Path:
+    """Compile all shards + main.mojo to Android `.o` objects in parallel and link 16KB-aligned `.so`."""
+    src_files = sorted(out_dir.glob("shard_*.mojo")) + [out_dir / "main.mojo"]
+    workers = max(1, jobs or min(len(src_files), os.cpu_count() or 2))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        obj_files = list(ex.map(lambda sf: _compile_obj(mojo_bin, repo_root, out_dir, sf, target_triple), src_files))
+
+    so_path.parent.mkdir(parents=True, exist_ok=True)
+    link_cmd = [
+        ndk_clang,
+        "-shared",
+        "-O2",
+        "-Wl,-z,max-page-size=16384",
+        "-Wl,--export-dynamic",
+        *[str(o) for o in obj_files],
+        "-llog",
+        "-lm",
+        "-ldl",
+        "-o",
+        str(so_path),
+    ]
+    subprocess.run(link_cmd, check=True)
+    return so_path

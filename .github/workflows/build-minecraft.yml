@@ -1,0 +1,172 @@
+name: Build Minecraft Mojo 1.2 Full Analysis & Shards
+
+on:
+  workflow_dispatch:
+    inputs:
+      mc_version:
+        description: "Minecraft Sürümü (örn. 26.3)"
+        required: true
+        default: "26.3"
+      shards:
+        description: "Mojo Paralel Shard Sayısı"
+        required: true
+        default: "32"
+      jobs:
+        description: "Paralel Derleyici İş Parçacığı (CPU)"
+        required: true
+        default: "4"
+      build_target:
+        description: "Derleme Hedefi"
+        type: choice
+        options:
+          - rta-translate-and-apk
+          - android-arm64-core-shards
+          - full-client-shards-experimental
+        required: true
+        default: "rta-translate-and-apk"
+      runner_label:
+        description: "GitHub Runner (yüksek RAM/CPU için custom label veya ubuntu-24.04)"
+        required: true
+        default: "ubuntu-24.04"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: muffin-mc-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-minecraft-mojo:
+    name: Build Minecraft ${{ inputs.mc_version }} (${{ inputs.build_target }})
+    runs-on: ${{ inputs.runner_label }}
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout Muffin
+        uses: actions/checkout@v4
+
+      - name: System Specs
+        run: |
+          nproc
+          free -h
+          df -h
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup Temurin Java 25 (RTA + Classlib)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - name: Cache Mojo 1.2, Muffin & Mojang Downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/mojo-venv
+            ~/.cache/muffin
+            work/versions
+            work/libraries
+          key: ${{ runner.os }}-mc-${{ inputs.mc_version }}-v1
+          restore-keys: |
+            ${{ runner.os }}-mc-
+
+      - name: Install Mojo 1.2.0
+        run: |
+          if [ ! -x "$HOME/.cache/mojo-venv/bin/mojo" ]; then
+            python3 -m venv "$HOME/.cache/mojo-venv"
+            "$HOME/.cache/mojo-venv/bin/pip" install --upgrade pip
+            "$HOME/.cache/mojo-venv/bin/pip" install mojo==1.2.0
+          fi
+          echo "$HOME/.cache/mojo-venv/bin" >> "$GITHUB_PATH"
+          "$HOME/.cache/mojo-venv/bin/mojo" --version
+
+      - name: Ensure Android SDK & NDK
+        run: |
+          SDK_DIR="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          echo "ANDROID_HOME=$SDK_DIR" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_DIR" >> "$GITHUB_ENV"
+          if [ ! -d "$SDK_DIR/ndk" ] || [ -z "$(ls -A "$SDK_DIR/ndk" 2>/dev/null)" ]; then
+            yes | "$SDK_DIR/cmdline-tools/latest/bin/sdkmanager" "ndk;28.2.13676358" "platforms;android-34" "build-tools;34.0.0"
+          fi
+
+      - name: Download Official Minecraft client.jar & Libraries (SHA-1 Verified)
+        run: |
+          python3 tools/fetch_client.py --version "${{ inputs.mc_version }}" --with-libraries
+          ls -lh "work/versions/${{ inputs.mc_version }}/client.jar"
+
+      - name: Analyze, CFG Reducibility & Closed-World RTA Closure
+        run: |
+          mkdir -p work/reports
+          python3 -m tools.muffin analyze | tee work/reports/analyze.txt
+          python3 -m tools.muffin cfg | tee work/reports/cfg.txt
+          python3 -m tools.muffin rta | tee work/reports/rta.txt
+
+      - name: Translate 100% client.jar to Sharded Mojo 1.2 (${{ inputs.shards }} shards)
+        run: |
+          START=$SECONDS
+          python3 -m tools.muffin translate -o work/out/mc_shards --shards "${{ inputs.shards }}" | tee work/reports/translate.txt
+          echo "TRANSLATE_SEC=$((SECONDS - START))" >> "$GITHUB_ENV"
+          ls -lh work/out/mc_shards | head -n 40
+
+      - name: Compile Android ARM64 Core Minecraft Shards (.so)
+        if: inputs.build_target == 'android-arm64-core-shards' || inputs.build_target == 'rta-translate-and-apk'
+        run: |
+          python3 -m tools.muffin build-lib \
+            --filter net/minecraft/util/Mth \
+            --filter net/minecraft/core/Vec3i \
+            --filter net/minecraft/core/BlockPos \
+            --filter net/minecraft/world/phys/Vec3 \
+            --filter net/minecraft/world/phys/AABB \
+            --shards 4 \
+            --jobs "${{ inputs.jobs }}" \
+            --target-triple aarch64-unknown-linux-android26 \
+            --name libmuffin_mc_core.so \
+            -o work/out/android_core_so
+          NDK_BIN=$(ls -d "$ANDROID_HOME"/ndk/*/toolchains/llvm/prebuilt/linux-x86_64/bin | sort -V | tail -n 1)
+          "$NDK_BIN/llvm-readelf" -h work/out/android_core_so/libmuffin_mc_core.so | grep -E "ELF64|AArch64"
+          "$NDK_BIN/llvm-nm" -D work/out/android_core_so/libmuffin_mc_core.so | grep -E "mc_android_entry|j2z_android_entry"
+
+      - name: Full Experimental All-Shard ARM64 Build (High-RAM Runner)
+        if: inputs.build_target == 'full-client-shards-experimental'
+        run: |
+          python3 -m tools.muffin build-lib \
+            --shards "${{ inputs.shards }}" \
+            --jobs "${{ inputs.jobs }}" \
+            --target-triple aarch64-unknown-linux-android26 \
+            --name libminecraft_muffin.so \
+            -o work/out/full_android_so
+          NDK_BIN=$(ls -d "$ANDROID_HOME"/ndk/*/toolchains/llvm/prebuilt/linux-x86_64/bin | sort -V | tail -n 1)
+          "$NDK_BIN/llvm-readelf" -h work/out/full_android_so/libminecraft_muffin.so | grep -E "ELF64|AArch64"
+
+      - name: Build Dual-ABI Android Launcher APK
+        run: |
+          python3 -m tools.muffin apk
+          ls -lh releases/Muffin-Minecraft-Mojo-Edition.apk
+
+      - name: Upload Artifacts (APK, Reports, Native Libraries)
+        uses: actions/upload-artifact@v4
+        with:
+          name: muffin-mc-${{ inputs.mc_version }}-${{ inputs.build_target }}
+          path: |
+            releases/Muffin-Minecraft-Mojo-Edition.apk
+            work/reports/*.txt
+            work/out/android_core_so/libmuffin_mc_core.so
+            work/out/full_android_so/libminecraft_muffin.so
+          retention-days: 14
+
+      - name: Write Build Summary
+        if: always()
+        run: |
+          {
+            echo "## Muffin Minecraft ${{ inputs.mc_version }} Build (${{ inputs.build_target }})"
+            echo "- Runner: \`${{ inputs.runner_label }}\` (\`$(nproc)\` vCPU, \`$(free -h | awk '/Mem:/ {print $2}')\` RAM)"
+            echo "- Shards: \`${{ inputs.shards }}\` | Jobs: \`${{ inputs.jobs }}\` | Translate: \`${TRANSLATE_SEC:-?}s\`"
+            echo '```text'
+            cat work/reports/*.txt 2>/dev/null || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
