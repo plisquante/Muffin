@@ -190,6 +190,7 @@ class CodegenStats:
     vdisp_to_shard: dict[tuple[str, str, str], int] | None = None
     vdisp_needed: set[tuple[str, str, str]] = field(default_factory=set)
     large_ifaces: set[str] = field(default_factory=set)
+    emitted_methods: set[tuple[str, str, str]] | None = None
 
 
 def _resolve_static_owner(hierarchy: Hierarchy, owner: str, fname: str) -> str | None:
@@ -205,7 +206,7 @@ def _resolve_static_owner(hierarchy: Hierarchy, owner: str, fname: str) -> str |
             if res is not None:
                 return res
         cur = ci.cf.super_name
-    return owner if owner in hierarchy.classes else None
+    return None
 
 
 def _escape_mojo_str(s: str) -> str:
@@ -825,23 +826,32 @@ def _emit_ast(
         if opt.has_loop and _ast_has_arena_alloc(node.body, opt.arena_allocs):
             w(f"{ind}    var _lmark = _s[].arena.mark()")
             w(f"{ind}    try:")
+            w_pos = len(out)
             _emit_ast(out, ind + "        ", hierarchy, ci, node.body, opt, stats)
+            if len(out) == w_pos:
+                w(f"{ind}        pass")
             w(f"{ind}    finally:")
             w(f"{ind}        _s[].arena.restore(_lmark)")
         else:
+            w_pos = len(out)
             _emit_ast(out, ind + "    ", hierarchy, ci, node.body, opt, stats)
+            if len(out) == w_pos:
+                w(f"{ind}    pass")
     elif isinstance(node, IfNode):
         cond = _cond_expr(node.cond_stmt)
         w(f"{ind}if {cond}:")
-        then_empty = isinstance(node.then_node, SeqNode) and not node.then_node.items
-        if then_empty:
+        t_pos = len(out)
+        _emit_ast(out, ind + "    ", hierarchy, ci, node.then_node, opt, stats)
+        if len(out) == t_pos:
             w(f"{ind}    pass")
-        else:
-            _emit_ast(out, ind + "    ", hierarchy, ci, node.then_node, opt, stats)
         else_empty = isinstance(node.else_node, SeqNode) and not node.else_node.items
         if not else_empty:
+            e_hdr = len(out)
             w(f"{ind}else:")
+            e_pos = len(out)
             _emit_ast(out, ind + "    ", hierarchy, ci, node.else_node, opt, stats)
+            if len(out) == e_pos:
+                del out[e_hdr:]
 
 
 def _emit_dispatch(
@@ -864,28 +874,75 @@ def _emit_dispatch(
         bind = ind + "        "
         if blk.handlers:
             w(f"{bind}try:")
+            w(f"{bind}    if False:")
+            w(f'{bind}        raise JThrowable(0, "")')
             _emit_block_stmts(out, bind + "    ", hierarchy, ci, blk, opt, stats, emit_term=True)
             w(f"{bind}except _exc:")
+            has_catch_all = False
+            _BUILTIN_EXC_IDS: dict[str, tuple[int, ...]] = {
+                "java/lang/NullPointerException": (1,),
+                "java/lang/OutOfMemoryError": (2,),
+                "java/lang/NegativeArraySizeException": (3,),
+                "java/lang/ArrayIndexOutOfBoundsException": (4,),
+                "java/lang/StringIndexOutOfBoundsException": (4,),
+                "java/lang/IndexOutOfBoundsException": (4,),
+                "java/lang/ArithmeticException": (5,),
+                "java/lang/ClassCastException": (6,),
+                "java/lang/AbstractMethodError": (8,),
+                "java/lang/IncompatibleClassChangeError": (8,),
+                "java/lang/LinkageError": (8,),
+                "java/lang/NumberFormatException": (9,),
+                "java/lang/IllegalArgumentException": (9,),
+                "java/lang/RuntimeException": (1, 3, 4, 5, 6, 9),
+                "java/lang/Exception": (1, 3, 4, 5, 6, 9),
+                "java/lang/Error": (2, 8),
+                "java/lang/VirtualMachineError": (2,),
+                "java/lang/Throwable": (1, 2, 3, 4, 5, 6, 8, 9),
+            }
             for idx_h, (ctype, hpc) in enumerate(blk.handlers):
                 s0_assign = "s0_R = _exc.obj.copy()" if "s0_R" in opt.live_vars else ""
-                if ctype is None or len(blk.handlers) == 1:
+                if ctype is None:
+                    if idx_h > 0:
+                        w(f"{bind}    else:")
+                        hind = bind + "        "
+                    else:
+                        hind = bind + "    "
                     if s0_assign:
-                        w(f"{bind}    {s0_assign}")
-                    w(f"{bind}    _pc = {hpc}")
-                    w(f"{bind}    continue")
+                        w(f"{hind}{s0_assign}")
+                    w(f"{hind}_pc = {hpc}")
+                    w(f"{hind}continue")
+                    has_catch_all = True
                     break
                 h_kw = "if" if idx_h == 0 else "elif"
+                conds: list[str] = []
                 if ctype in hierarchy.classes:
                     tci = hierarchy.classes[ctype]
-                    w(f"{bind}    {h_kw} _exc.class_id >= {tci.class_id} and _exc.class_id <= {tci.max_sub_id}:")
-                else:
-                    w(f"{bind}    {h_kw} True:")
+                    if tci.cf.is_interface:
+                        ids = hierarchy.interface_impl_ids.get(ctype, [])
+                        runs = compress_cid_runs(ids)
+                        if runs:
+                            if len(runs) > 16 and ctype in stats.large_ifaces:
+                                conds.append(f"{_iface_helper_name(ctype)}(_exc.class_id)")
+                            else:
+                                conds.append(f"({_iface_cond_expr('_exc.class_id', runs)})")
+                    else:
+                        conds.append(f"(_exc.class_id >= Int32({tci.class_id}) and _exc.class_id <= Int32({tci.max_sub_id}))")
+                for bid in _BUILTIN_EXC_IDS.get(ctype, ()):
+                    conds.append(f"_exc.class_id == Int32({bid})")
+                cond_str = " or ".join(conds) if conds else "False"
+                w(f"{bind}    {h_kw} {cond_str}:")
                 if s0_assign:
                     w(f"{bind}        {s0_assign}")
                 w(f"{bind}        _pc = {hpc}")
                 w(f"{bind}        continue")
+            if not has_catch_all:
+                w(f"{bind}    else:")
+                w(f"{bind}        raise _exc^")
         else:
+            b_pos = len(out)
             _emit_block_stmts(out, bind, hierarchy, ci, blk, opt, stats, emit_term=True)
+            if len(out) == b_pos:
+                w(f"{bind}pass")
 
 
 def _copy_if_ref(val: Val) -> str:
@@ -1590,9 +1647,16 @@ def _emit_call(w, ind: str, hierarchy: Hierarchy, dst: Val | None, args: tuple, 
                     stats.vdisp_needed.add(vkey)
                     _emit_vdisp_call(w, ind, stats, vkey, recv, cargs, rhs_dst)
                 return
+            if dst is not None and dst.name in opt.live_vars:
+                w(f"{ind}{dst.name} = {kind_default(dst.kind)}  # unreachable virtual: {owner}.{mname}{mdesc}")
+            else:
+                w(f"{ind}pass  # unreachable virtual: {owner}.{mname}{mdesc}")
+            return
 
     resolved_owner = hierarchy.resolve_method(target_owner, mname, mdesc)
-    if resolved_owner is None:
+    if resolved_owner is None or (
+        stats.emitted_methods is not None and (resolved_owner, mname, mdesc) not in stats.emitted_methods
+    ):
         if dst is not None and dst.name in opt.live_vars:
             w(f"{ind}{dst.name} = {kind_default(dst.kind)}  # external: {owner}.{mname}{mdesc}")
         else:
@@ -1632,7 +1696,9 @@ def _emit_resolved_call_or_builtin(
         else:
             w(f"{ind}_ = {expr}")
         return
-    if hierarchy.resolve_method(impl_owner, mname, mdesc) is None:
+    if hierarchy.resolve_method(impl_owner, mname, mdesc) is None or (
+        stats.emitted_methods is not None and (impl_owner, mname, mdesc) not in stats.emitted_methods
+    ):
         if dst is not None:
             w(f"{ind}{dst.name} = {kind_default(dst.kind)}  # native/ext: {impl_owner}.{mname}{mdesc}")
         else:
@@ -1761,7 +1827,9 @@ def emit_vdisp_function(
         if (impl_owner, mname, mdesc) == ("java/lang/Object", "equals", "(Ljava/lang/Object;)Z"):
             w(f"{ind}return Int32(1) if arg0.same(p0) else Int32(0)")
             return
-        if hierarchy.resolve_method(impl_owner, mname, mdesc) is None:
+        if hierarchy.resolve_method(impl_owner, mname, mdesc) is None or (
+            stats.emitted_methods is not None and (impl_owner, mname, mdesc) not in stats.emitted_methods
+        ):
             w(f"{ind}return" if ret_t.is_void else f"{ind}return {kind_default(ret_k)}")
             return
         fn_m = mangle_method(impl_owner, mname, mdesc)
@@ -1794,7 +1862,7 @@ def emit_vdisp_function(
             w(f'{ind}    raise JThrowable(_s[].exc_cid, "cross_shard", _s[].exc_obj.copy())')
             w(f"{ind}var _r = _s[].ret_ref.copy()")
             w(f"{ind}_s[].ret_ref = JRef()")
-            w(f"{ind}return _r")
+            w(f"{ind}return _r^")
         else:
             w(f"{ind}var _xr = {cexpr}")
             w(f"{ind}if _s[].has_exc:")

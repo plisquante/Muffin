@@ -59,24 +59,28 @@ def emit_sharded_project(
         main_p.write_text(code)
         return stats, [main_p]
 
-    # 1. Greedy package-grouped bin packing so calls within a package stay intra-shard
+    # 1. Balanced full-package bin packing weighted by bytecode size + method count
     pkg_groups: dict[str, list[str]] = defaultdict(list)
     for cname in sorted(hierarchy.classes):
         parts = cname.split("/")
-        pkg = "/".join(parts[: min(3, len(parts) - 1)]) or "root"
+        pkg = "/".join(parts[:-1]) or "root"
         pkg_groups[pkg].append(cname)
+
+    def _cls_weight(cname: str) -> int:
+        cf = hierarchy.classes[cname].cf
+        return sum(10 + len(m.code.code) for m in cf.methods if m.code is not None) + len(cf.fields) + 1
 
     actual_shards = min(shards, max(1, len(pkg_groups)))
     buckets: list[list[str]] = [[] for _ in range(actual_shards)]
     loads = [0] * actual_shards
     for _, names in sorted(
         pkg_groups.items(),
-        key=lambda kv: sum(len(hierarchy.classes[c].cf.methods) for c in kv[1]),
+        key=lambda kv: sum(_cls_weight(c) for c in kv[1]),
         reverse=True,
     ):
         idx = min(range(actual_shards), key=lambda i: loads[i])
         buckets[idx].extend(names)
-        loads[idx] += sum(len(hierarchy.classes[c].cf.methods) for c in names)
+        loads[idx] += sum(_cls_weight(c) for c in names)
 
     class_to_shard: dict[str, int] = {}
     for s_idx, b in enumerate(buckets):
@@ -100,6 +104,7 @@ def emit_sharded_project(
                 lifted_by_shard[s_idx].append((ci, m, ir))
                 all_irs.append(ir)
 
+    stats.emitted_methods = {(ir.owner, ir.name, ir.descriptor) for ir in all_irs}
     non_escaping_params = compute_non_escaping_params(all_irs)
 
     # 3. Scan cross-shard accesses, large interfaces, and sharded virtual dispatchers
@@ -123,6 +128,13 @@ def emit_sharded_project(
     for s_idx in range(actual_shards):
         for _, _, ir in lifted_by_shard[s_idx]:
             for blk in ir.blocks.values():
+                for ctype, _ in blk.handlers:
+                    if ctype and ctype not in stats.large_ifaces:
+                        tci = hierarchy.classes.get(ctype)
+                        if tci is not None and tci.cf.is_interface:
+                            ids = hierarchy.interface_impl_ids.get(ctype, [])
+                            if len(compress_cid_runs(ids)) > 16:
+                                stats.large_ifaces.add(ctype)
                 for st in blk.stmts:
                     op, a = st.op, st.args
                     if op == "new":
@@ -161,7 +173,7 @@ def emit_sharded_project(
                             devirt = hierarchy.resolve_devirtualized(owner, mn, md)
                             if devirt is not None:
                                 r_own = hierarchy.resolve_method(devirt, mn, md)
-                                if r_own and class_to_shard.get(r_own) != s_idx:
+                                if r_own and (r_own, mn, md) in stats.emitted_methods and class_to_shard.get(r_own) != s_idx:
                                     cross_calls.add((r_own, mn, md))
                             else:
                                 subs = hierarchy.concrete_targets(owner, mn, md)
@@ -172,19 +184,15 @@ def emit_sharded_project(
                                         vdisp_to_shard[vkey] = vs
                                         vdisp_by_shard[vs].append(vkey)
                                         for _, impl in subs:
-                                            if class_to_shard.get(impl) != vs:
+                                            if (impl, mn, md) in stats.emitted_methods and class_to_shard.get(impl) != vs:
                                                 cross_calls.add((impl, mn, md))
                                 elif subs:
                                     for _, impl in subs:
-                                        if class_to_shard.get(impl) != s_idx:
+                                        if (impl, mn, md) in stats.emitted_methods and class_to_shard.get(impl) != s_idx:
                                             cross_calls.add((impl, mn, md))
-                                else:
-                                    r_own = hierarchy.resolve_method(owner, mn, md)
-                                    if r_own and class_to_shard.get(r_own) != s_idx:
-                                        cross_calls.add((r_own, mn, md))
                         else:
                             r_own = hierarchy.resolve_method(owner, mn, md)
-                            if r_own and class_to_shard.get(r_own) != s_idx:
+                            if r_own and (r_own, mn, md) in stats.emitted_methods and class_to_shard.get(r_own) != s_idx:
                                 cross_calls.add((r_own, mn, md))
 
     stats.vdisp_to_shard = vdisp_to_shard
@@ -317,6 +325,33 @@ def _compile_obj(
     return obj
 
 
+def _compile_all_parallel(
+    src_files: list[Path],
+    repo_root: Path,
+    out_dir: Path,
+    mojo_bin: str,
+    target_triple: str | None,
+    opt_level: int,
+    jobs: int | None,
+) -> list[Path]:
+    from concurrent.futures import as_completed
+
+    workers = max(1, jobs or min(len(src_files), os.cpu_count() or 2))
+    print(f"[muffin] compiling {len(src_files)} Mojo units (-O{opt_level}, jobs={workers})...", flush=True)
+    results: dict[Path, Path] = {}
+    ex = ThreadPoolExecutor(max_workers=workers)
+    futs = {ex.submit(_compile_obj, mojo_bin, repo_root, out_dir, sf, target_triple, opt_level): sf for sf in src_files}
+    try:
+        for fut in as_completed(futs):
+            sf = futs[fut]
+            results[sf] = fut.result()
+    except BaseException:
+        ex.shutdown(wait=True, cancel_futures=True)
+        raise
+    ex.shutdown(wait=True)
+    return [results[sf] for sf in src_files]
+
+
 def compile_sharded(
     out_dir: Path,
     repo_root: Path,
@@ -329,11 +364,7 @@ def compile_sharded(
 ) -> None:
     """Compile each `shard_XX.mojo` to `.o` in parallel and link with `main.mojo`."""
     shard_files = sorted(out_dir.glob("shard_*.mojo"))
-    workers = max(1, jobs or min(len(shard_files), os.cpu_count() or 2))
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        obj_files = list(
-            ex.map(lambda sf: _compile_obj(mojo_bin, repo_root, out_dir, sf, target_triple, opt_level), shard_files)
-        )
+    obj_files = _compile_all_parallel(shard_files, repo_root, out_dir, mojo_bin, target_triple, opt_level, jobs)
 
     cmd = [mojo_bin, "build", "-O", str(opt_level)]
     if target_triple:
@@ -358,12 +389,7 @@ def compile_sharded_shared_lib(
 ) -> Path:
     """Compile all shards + main.mojo to Android `.o` objects in parallel and link 16KB-aligned `.so`."""
     src_files = sorted(out_dir.glob("shard_*.mojo")) + [out_dir / "main.mojo"]
-    workers = max(1, jobs or min(len(src_files), os.cpu_count() or 2))
-    print(f"[muffin] compiling {len(src_files)} Mojo shards (-O{opt_level}, jobs={workers})...", flush=True)
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        obj_files = list(
-            ex.map(lambda sf: _compile_obj(mojo_bin, repo_root, out_dir, sf, target_triple, opt_level), src_files)
-        )
+    obj_files = _compile_all_parallel(src_files, repo_root, out_dir, mojo_bin, target_triple, opt_level, jobs)
 
     so_path.parent.mkdir(parents=True, exist_ok=True)
     link_cmd = [

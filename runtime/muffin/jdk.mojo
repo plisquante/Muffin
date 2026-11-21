@@ -374,7 +374,7 @@ def jint_parse(s: JRef) raises JThrowable -> Int32:
     try:
         return Int32(Int(txt))
     except:
-        raise JThrowable(10, "java/lang/NumberFormatException")
+        raise JThrowable(9, "java/lang/NumberFormatException")
 
 
 def jarrays_fill_i(arr: JRef, val: Int32) raises JThrowable:
