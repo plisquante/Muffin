@@ -1,0 +1,8 @@
+work/
+.venv/
+__pycache__/
+*.pyc
+*.part
+/out/
+.pixi/
+*.mojopkg
