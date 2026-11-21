@@ -117,7 +117,11 @@ jobs:
       - name: Translate Full Closed-World RTA (client.jar + Libs + JDK) to Decoupled Mojo Shards
         run: |
           START=$SECONDS
-          python3 -m tools.muffin translate --rta -o work/out/mc_shards --shards "${{ inputs.shards }}" | tee work/reports/translate.txt
+          EXTRA_FLAGS=""
+          if [ "${{ inputs.build_target }}" = "full-client-shards-experimental" ]; then
+            EXTRA_FLAGS="--shared-lib"
+          fi
+          python3 -m tools.muffin translate --rta -o work/out/mc_shards --shards "${{ inputs.shards }}" $EXTRA_FLAGS | tee work/reports/translate.txt
           echo "TRANSLATE_SEC=$((SECONDS - START))" >> "$GITHUB_ENV"
           ls -lh work/out/mc_shards/shared.mojo
           ls -lh work/out/mc_shards | head -n 40
@@ -145,8 +149,7 @@ jobs:
         if: inputs.build_target == 'full-client-shards-experimental'
         run: |
           python3 -m tools.muffin build-lib \
-            --rta \
-            --shards "${{ inputs.shards }}" \
+            --shards-dir work/out/mc_shards \
             --jobs "${{ inputs.jobs }}" \
             --opt "${{ inputs.opt_level }}" \
             --target-triple aarch64-unknown-linux-android26 \

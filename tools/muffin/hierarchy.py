@@ -51,6 +51,10 @@ class Hierarchy:
     interface_impl_ids: dict[str, list[int]] = field(default_factory=dict)
     instantiated: set[str] | None = None
     devirt_cache: dict[tuple[str, str, str], str | None] = field(default_factory=dict)
+    subtypes_cache: dict[str, list[str]] = field(default_factory=dict)
+    concrete_cache: dict[tuple[str, str, str], list[tuple[int, str]]] = field(default_factory=dict)
+    resolve_cache: dict[tuple[str, str, str], str | None] = field(default_factory=dict)
+    _class_methods_with_code: dict[str, set[tuple[str, str]]] = field(default_factory=dict)
 
     @classmethod
     def build(
@@ -78,6 +82,10 @@ class Hierarchy:
         h._assign_dfs_ids()
         h._compute_layouts()
         h._compute_interface_impl_ids()
+        for cname, ci in classes.items():
+            h._class_methods_with_code[cname] = {
+                (mm.name, mm.descriptor) for mm in ci.cf.methods if mm.code is not None
+            }
         return h
 
     def _assign_dfs_ids(self) -> None:
@@ -173,6 +181,9 @@ class Hierarchy:
         self.interface_impl_ids = dict(impls)
 
     def _subtypes(self, root: str) -> list[str]:
+        cached = self.subtypes_cache.get(root)
+        if cached is not None:
+            return cached
         out: list[str] = []
         stack = [root]
         seen: set[str] = set()
@@ -185,40 +196,39 @@ class Hierarchy:
                 out.append(cur)
             stack.extend(self.children.get(cur, ()))
             stack.extend(self.implementors.get(cur, ()))
+        self.subtypes_cache[root] = out
         return out
 
     def concrete_targets(self, owner: str, name: str, desc: str) -> list[tuple[int, str]]:
         """Return list of (concrete_class_id, impl_owner) for dispatch."""
         if owner not in self.classes:
             return []
+        key = (owner, name, desc)
+        cached = self.concrete_cache.get(key)
+        if cached is not None:
+            return cached
         out: list[tuple[int, str]] = []
+        inst = self.instantiated
         for sub in self._subtypes(owner):
             ci = self.classes[sub]
             if ci.cf.is_interface or (ci.cf.access & ACC_ABSTRACT):
                 continue
-            if self.instantiated is not None and sub not in self.instantiated:
+            if inst is not None and sub not in inst:
                 continue
             impl = self._find_impl(sub, name, desc)
             if impl is not None:
                 out.append((ci.class_id, impl))
         out.sort()
+        self.concrete_cache[key] = out
         return out
 
     def _find_impl(self, concrete_cls: str, name: str, desc: str) -> str | None:
-        cur: str | None = concrete_cls
-        while cur and cur in self.classes:
-            cci = self.classes[cur]
-            if any(
-                not mm.is_static()
-                and not (mm.access & ACC_ABSTRACT)
-                and mm.name == name
-                and mm.descriptor == desc
-                for mm in cci.cf.methods
-            ):
-                return cur
-            cur = cci.cf.super_name
+        ci = self.classes[concrete_cls]
+        slot = ci.vtable_index.get((name, desc))
+        if slot is not None:
+            return ci.vtable[slot][2]
         # Default interface method fallback
-        stk = list(self.classes[concrete_cls].all_interfaces)
+        stk = list(ci.all_interfaces)
         seen: set[str] = set()
         while stk:
             ic = stk.pop()
@@ -226,25 +236,23 @@ class Hierarchy:
                 continue
             seen.add(ic)
             ici = self.classes[ic]
-            if any(
-                not mm.is_static()
-                and not (mm.access & ACC_ABSTRACT)
-                and mm.name == name
-                and mm.descriptor == desc
-                for mm in ici.cf.methods
-            ):
-                return ic
+            if (name, desc) in ici.vtable_index:
+                return ici.vtable[ici.vtable_index[(name, desc)]][2]
             stk.extend(ici.cf.interfaces)
         return None
 
     def resolve_method(self, owner: str, name: str, desc: str) -> str | None:
         """Resolve a declared/inherited method (including static/special) up the hierarchy."""
+        key = (owner, name, desc)
+        if key in self.resolve_cache:
+            return self.resolve_cache[key]
+        mkey = (name, desc)
         cur: str | None = owner
         while cur and cur in self.classes:
-            cci = self.classes[cur]
-            if any(mm.name == name and mm.descriptor == desc and mm.code is not None for mm in cci.cf.methods):
+            if mkey in self._class_methods_with_code[cur]:
+                self.resolve_cache[key] = cur
                 return cur
-            cur = cci.cf.super_name
+            cur = self.classes[cur].cf.super_name
         # Check superinterfaces for default methods
         if owner in self.classes:
             stk = list(self.classes[owner].all_interfaces)
@@ -254,10 +262,11 @@ class Hierarchy:
                 if ic in seen or ic not in self.classes:
                     continue
                 seen.add(ic)
-                ici = self.classes[ic]
-                if any(mm.name == name and mm.descriptor == desc and mm.code is not None for mm in ici.cf.methods):
+                if mkey in self._class_methods_with_code[ic]:
+                    self.resolve_cache[key] = ic
                     return ic
-                stk.extend(ici.cf.interfaces)
+                stk.extend(self.classes[ic].cf.interfaces)
+        self.resolve_cache[key] = None
         return None
 
     def resolve_devirtualized(self, owner: str, name: str, desc: str) -> str | None:

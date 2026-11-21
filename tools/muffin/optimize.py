@@ -132,14 +132,13 @@ def _has_side_effect(st: Stmt) -> bool:
 
 def compute_non_escaping_params(irs: list[MethodIR]) -> dict[tuple[str, str, str], set[int]]:
     """Find parameter positions (0=receiver, 1..N=args) per method that never escape."""
+    from collections import defaultdict, deque
+
     from .ir import KIND_R, jtype_to_kind
 
     by_key = {(ir.owner, ir.name, ir.descriptor): ir for ir in irs}
-    safe: dict[tuple[str, str, str], set[int]] = {
-        ("java/lang/Object", "<init>", "()V"): {0},
-    }
+    obj_init = ("java/lang/Object", "<init>", "()V")
 
-    # Precompute param slots -> arg index for every method
     param_slots: dict[tuple[str, str, str], list[tuple[int, str]]] = {}
     for key, ir in by_key.items():
         slots: list[tuple[int, str]] = []
@@ -154,71 +153,100 @@ def compute_non_escaping_params(irs: list[MethodIR]) -> dict[tuple[str, str, str
             arg_pos += 1
             loc += 2 if pt.is_wide else 1
         param_slots[key] = slots
-        if slots:
-            safe.setdefault(key, {p for p, _ in slots})
 
-    changed = True
-    while changed:
-        changed = False
-        for key, ir in by_key.items():
-            slots = param_slots.get(key)
-            if not slots:
-                continue
-            cur_safe = safe[key]
-            if not cur_safe:
-                continue
+    rev_edges: dict[tuple[tuple[str, str, str], int], list[tuple[tuple[str, str, str], int]]] = defaultdict(list)
+    unsafe_mask: dict[tuple[str, str, str], int] = {}
+    q: deque[tuple[tuple[str, str, str], int]] = deque()
 
-            taint: dict[str, set[int]] = {lname: {apos} for apos, lname in slots if apos in cur_safe}
-            local_changed = True
-            while local_changed:
-                local_changed = False
-                for blk in ir.blocks.values():
-                    for st in blk.stmts:
-                        op, dst, a = st.op, st.dst, st.args
-                        if dst is None:
-                            continue
-                        new_t: set[int] = set()
-                        if op == "copy":
-                            new_t = set(taint.get(a[0].name, ()))
-                        elif op == "checkcast":
-                            new_t = set(taint.get(a[1].name, ()))
-                        prev = taint.get(dst.name, set())
-                        if new_t and not new_t.issubset(prev):
-                            taint[dst.name] = prev | new_t
-                            local_changed = True
+    def _enqueue_bits(mkey: tuple[str, str, str], bits: int) -> None:
+        b = bits
+        while b:
+            lsb = b & -b
+            q.append((mkey, lsb.bit_length() - 1))
+            b ^= lsb
 
-            escaped: set[int] = set()
+    for key, ir in by_key.items():
+        slots = param_slots[key]
+        if not slots:
+            continue
+        taint: dict[str, int] = {lname: (1 << apos) for apos, lname in slots}
+        local_changed = True
+        while local_changed:
+            local_changed = False
             for blk in ir.blocks.values():
                 for st in blk.stmts:
-                    op, a = st.op, st.args
-                    if op == "putstatic":
-                        escaped.update(taint.get(a[3].name, ()))
-                    elif op == "putfield":
-                        escaped.update(taint.get(a[4].name, ()))
-                    elif op == "astore_elem" and a[0] == "a":
-                        escaped.update(taint.get(a[3].name, ()))
-                    elif op == "call":
-                        cop, own, mn, md, recv, cargs = a
-                        csafe = safe.get((own, mn, md), ())
-                        if recv is not None and 0 not in csafe:
-                            escaped.update(taint.get(recv.name, ()))
-                        off = 0 if cop == "invokestatic" else 1
-                        for idx, ca in enumerate(cargs):
-                            if (off + idx) not in csafe:
-                                escaped.update(taint.get(ca.name, ()))
-                    elif op == "indy":
-                        for ca in a[3]:
-                            escaped.update(taint.get(ca.name, ()))
-                if blk.term is not None:
-                    if blk.term.op == "ret" and blk.term.args:
-                        escaped.update(taint.get(blk.term.args[0].name, ()))
-                    elif blk.term.op == "throw":
-                        escaped.update(taint.get(blk.term.args[0].name, ()))
+                    op, dst, a = st.op, st.dst, st.args
+                    if dst is None:
+                        continue
+                    if op == "copy":
+                        new_m = taint.get(a[0].name, 0)
+                    elif op == "checkcast":
+                        new_m = taint.get(a[1].name, 0)
+                    else:
+                        continue
+                    if new_m:
+                        prev = taint.get(dst.name, 0)
+                        merged = prev | new_m
+                        if merged != prev:
+                            taint[dst.name] = merged
+                            local_changed = True
 
-            new_safe = cur_safe - escaped
-            if new_safe != cur_safe:
-                safe[key] = new_safe
-                changed = True
+        always_escape = 0
+        for blk in ir.blocks.values():
+            for st in blk.stmts:
+                op, a = st.op, st.args
+                if op == "putstatic":
+                    always_escape |= taint.get(a[3].name, 0)
+                elif op == "putfield":
+                    always_escape |= taint.get(a[4].name, 0)
+                elif op == "astore_elem" and a[0] == "a":
+                    always_escape |= taint.get(a[3].name, 0)
+                elif op == "call":
+                    cop, own, mn, md, recv, cargs = a
+                    ckey = (own, mn, md)
+                    callee_in_world = ckey in by_key or ckey == obj_init
+                    if recv is not None:
+                        rm = taint.get(recv.name, 0)
+                        if rm:
+                            if not callee_in_world:
+                                always_escape |= rm
+                            elif ckey != obj_init:
+                                rev_edges[(ckey, 0)].append((key, rm))
+                    off = 0 if cop == "invokestatic" else 1
+                    for idx, ca in enumerate(cargs):
+                        cm = taint.get(ca.name, 0)
+                        if cm:
+                            if not callee_in_world:
+                                always_escape |= cm
+                            elif ckey != obj_init:
+                                rev_edges[(ckey, off + idx)].append((key, cm))
+                elif op == "indy":
+                    for ca in a[3]:
+                        always_escape |= taint.get(ca.name, 0)
+            if blk.term is not None:
+                if blk.term.op == "ret" and blk.term.args:
+                    always_escape |= taint.get(blk.term.args[0].name, 0)
+                elif blk.term.op == "throw":
+                    always_escape |= taint.get(blk.term.args[0].name, 0)
+
+        if always_escape:
+            unsafe_mask[key] = always_escape
+            _enqueue_bits(key, always_escape)
+
+    while q:
+        ckey, capos = q.popleft()
+        for caller_key, caller_mask in rev_edges.get((ckey, capos), ()):
+            prev_u = unsafe_mask.get(caller_key, 0)
+            delta = caller_mask & ~prev_u
+            if delta:
+                unsafe_mask[caller_key] = prev_u | delta
+                _enqueue_bits(caller_key, delta)
+
+    safe: dict[tuple[str, str, str], set[int]] = {obj_init: {0}}
+    for key, slots in param_slots.items():
+        if slots:
+            um = unsafe_mask.get(key, 0)
+            safe[key] = {apos for apos, _ in slots if not (um & (1 << apos))}
     return safe
 
 

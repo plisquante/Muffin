@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import zlib
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -27,10 +28,12 @@ from .codegen_mojo import (
     _emit_method,
     _emit_runtime_imports,
     _resolve_static_owner,
+    compress_cid_runs,
     emit_cross_trampoline,
     emit_mojo_program,
     emit_shard_classes_and_statics,
     emit_shared_module,
+    emit_vdisp_function,
 )
 from .hierarchy import ClassInfo, Hierarchy
 from .ir import MethodIR, lift_method
@@ -82,12 +85,7 @@ def emit_sharded_project(
 
     stats = CodegenStats(current_shard=None, class_to_shard=class_to_shard)
 
-    # 2. Emit minimal shared.mojo (only JStatics, zero class structs / static fields)
-    shared_src, exported_syms = emit_shared_module(hierarchy, stats, num_shards=actual_shards)
-    (out_dir / "shared.mojo").write_text(shared_src)
-    shared_import = f"from shared import {', '.join(exported_syms)}"
-
-    # 3. Pre-lift all methods & compute inter-procedural Escape Analysis
+    # 2. Pre-lift all methods & compute inter-procedural Escape Analysis
     lifted_by_shard: list[list[tuple[ClassInfo, Member, MethodIR]]] = [[] for _ in range(actual_shards)]
     all_irs: list[MethodIR] = []
     for s_idx, b in enumerate(buckets):
@@ -104,13 +102,15 @@ def emit_sharded_project(
 
     non_escaping_params = compute_non_escaping_params(all_irs)
 
-    # 4. Scan cross-shard accesses so shards only export needed C-ABI trampolines
+    # 3. Scan cross-shard accesses, large interfaces, and sharded virtual dispatchers
     cross_news: set[str] = set()
     cross_gf: set[tuple[str, str]] = set()
     cross_pf: set[tuple[str, str]] = set()
     cross_gs: set[tuple[str, str]] = set()
     cross_ps: set[tuple[str, str]] = set()
     cross_calls: set[tuple[str, str, str]] = set()
+    vdisp_to_shard: dict[tuple[str, str, str], int] = {}
+    vdisp_by_shard: list[list[tuple[str, str, str]]] = [[] for _ in range(actual_shards)]
 
     for cname, cci in hierarchy.classes.items():
         for mm in cci.cf.methods:
@@ -129,6 +129,14 @@ def emit_sharded_project(
                         cn = a[0]
                         if cn in class_to_shard and class_to_shard[cn] != s_idx:
                             cross_news.add(cn)
+                    elif op in ("instanceof", "checkcast"):
+                        tc = a[0]
+                        if tc not in stats.large_ifaces:
+                            tci = hierarchy.classes.get(tc)
+                            if tci is not None and tci.cf.is_interface:
+                                ids = hierarchy.interface_impl_ids.get(tc, [])
+                                if len(compress_cid_runs(ids)) > 16:
+                                    stats.large_ifaces.add(tc)
                     elif op == "getfield":
                         own, fn, _ = a[0], a[1], a[2]
                         if own in class_to_shard and class_to_shard[own] != s_idx:
@@ -149,28 +157,44 @@ def emit_sharded_project(
                         cop, owner, mn, md, _, _ = a
                         if (owner, mn, md) in BUILTIN_CALLS:
                             continue
-                        targets: list[str] = []
                         if cop in ("invokevirtual", "invokeinterface"):
                             devirt = hierarchy.resolve_devirtualized(owner, mn, md)
                             if devirt is not None:
                                 r_own = hierarchy.resolve_method(devirt, mn, md)
-                                if r_own:
-                                    targets.append(r_own)
+                                if r_own and class_to_shard.get(r_own) != s_idx:
+                                    cross_calls.add((r_own, mn, md))
                             else:
                                 subs = hierarchy.concrete_targets(owner, mn, md)
-                                if subs:
-                                    targets.extend(impl for _, impl in subs)
+                                if subs and len(subs) > 8:
+                                    vkey = (owner, mn, md)
+                                    if vkey not in vdisp_to_shard:
+                                        vs = zlib.crc32(f"{owner}.{mn}{md}".encode()) % actual_shards
+                                        vdisp_to_shard[vkey] = vs
+                                        vdisp_by_shard[vs].append(vkey)
+                                        for _, impl in subs:
+                                            if class_to_shard.get(impl) != vs:
+                                                cross_calls.add((impl, mn, md))
+                                elif subs:
+                                    for _, impl in subs:
+                                        if class_to_shard.get(impl) != s_idx:
+                                            cross_calls.add((impl, mn, md))
                                 else:
                                     r_own = hierarchy.resolve_method(owner, mn, md)
-                                    if r_own:
-                                        targets.append(r_own)
+                                    if r_own and class_to_shard.get(r_own) != s_idx:
+                                        cross_calls.add((r_own, mn, md))
                         else:
                             r_own = hierarchy.resolve_method(owner, mn, md)
-                            if r_own:
-                                targets.append(r_own)
-                        for tgt in targets:
-                            if class_to_shard.get(tgt) != s_idx:
-                                cross_calls.add((tgt, mn, md))
+                            if r_own and class_to_shard.get(r_own) != s_idx:
+                                cross_calls.add((r_own, mn, md))
+
+    stats.vdisp_to_shard = vdisp_to_shard
+
+    # 4. Emit minimal shared.mojo (only JStatics + large-interface binary helpers)
+    shared_src, exported_syms = emit_shared_module(
+        hierarchy, stats, num_shards=actual_shards, large_ifaces=stats.large_ifaces
+    )
+    (out_dir / "shared.mojo").write_text(shared_src)
+    shared_import = f"from shared import {', '.join(exported_syms)}"
 
     # 5. Emit each decoupled shard_XX.mojo
     shard_paths: list[Path] = []
@@ -208,6 +232,8 @@ def emit_sharded_project(
             w("")
             if (ir.owner, ir.name, ir.descriptor) in cross_calls:
                 emit_cross_trampoline(out, ir)
+        for v_owner, v_mname, v_mdesc in sorted(vdisp_by_shard[s_idx]):
+            emit_vdisp_function(out, hierarchy, v_owner, v_mname, v_mdesc, stats, export_c_abi=True)
         sp = out_dir / f"shard_{s_idx:02d}.mojo"
         sp.write_text("\n".join(out))
         shard_paths.append(sp)
@@ -224,8 +250,7 @@ def emit_sharded_project(
     mw(f"    var statics = alloc_raw[JStatics]()")
     mw(f"    statics.unsafe_write(JStatics({actual_shards}))")
     for cname in sorted(hierarchy.classes):
-        cci = hierarchy.classes[cname]
-        if any(mm.name == "<clinit>" and mm.code is not None for mm in cci.cf.methods):
+        if (cname, "<clinit>", "()V") in cross_calls:
             fn_m = mangle_method(cname, "<clinit>", "()V")
             mw(f'    external_call["x_{fn_m}", NoneType](statics)')
             mw("    if statics[].has_exc:")
@@ -275,12 +300,20 @@ def _compile_obj(
     target_triple: str | None = None,
     opt_level: int = 3,
 ) -> Path:
+    import time as _t
+
     obj = src.with_suffix(".o")
     cmd = [mojo_bin, "build", "--emit", "object", "-O", str(opt_level)]
     if target_triple:
         cmd.extend(["--target-triple", target_triple])
     cmd.extend(["-I", str(repo_root), "-I", str(out_dir), str(src), "-o", str(obj)])
-    subprocess.run(cmd, check=True)
+    t0 = _t.monotonic()
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    dt = _t.monotonic() - t0
+    if res.returncode != 0:
+        print(f"[muffin] FAILED compiling {src.name} ({dt:.1f}s):\n{res.stdout}\n{res.stderr}", flush=True)
+        raise subprocess.CalledProcessError(res.returncode, cmd, res.stdout, res.stderr)
+    print(f"[muffin] compiled {src.name} -> {obj.name} ({dt:.1f}s, {obj.stat().st_size / 1024:.1f} KiB)", flush=True)
     return obj
 
 
@@ -326,6 +359,7 @@ def compile_sharded_shared_lib(
     """Compile all shards + main.mojo to Android `.o` objects in parallel and link 16KB-aligned `.so`."""
     src_files = sorted(out_dir.glob("shard_*.mojo")) + [out_dir / "main.mojo"]
     workers = max(1, jobs or min(len(src_files), os.cpu_count() or 2))
+    print(f"[muffin] compiling {len(src_files)} Mojo shards (-O{opt_level}, jobs={workers})...", flush=True)
     with ThreadPoolExecutor(max_workers=workers) as ex:
         obj_files = list(
             ex.map(lambda sf: _compile_obj(mojo_bin, repo_root, out_dir, sf, target_triple, opt_level), src_files)

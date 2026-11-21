@@ -395,6 +395,63 @@ public class App {
             mojo_out = subprocess.check_output([str(exe_path)], text=True)
             self.assertEqual(mojo_out, java_out)
 
+    def test_vdisp_binary_tree_sharded(self) -> None:
+        javac = shutil.which("javac")
+        java = shutil.which("java")
+        mojo = _find_mojo()
+        self.assertIsNotNone(javac)
+        self.assertIsNotNone(java)
+        self.assertIsNotNone(mojo)
+
+        lines = [
+            "package vdemo;",
+            "public class Main {",
+            "    public interface Op { int eval(int x); }",
+        ]
+        for i in range(12):
+            lines.append(f"    public static class Op{i} implements Op {{ public int eval(int x) {{ return x * {i + 2} + {i}; }} }}")
+        lines.extend([
+            "    public static void main(String[] args) {",
+            "        Op[] ops = new Op[] {",
+            "            " + ", ".join(f"new Op{i}()" for i in range(12)),
+            "        };",
+            "        int sum = 0;",
+            "        for (int i = 0; i < ops.length; i++) {",
+            "            sum += ops[i].eval(i + 5);",
+            "            if (ops[i] instanceof Op) sum += 1;",
+            "        }",
+            "        System.out.println(sum);",
+            "    }",
+            "}",
+        ])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            src_d = tmp / "src" / "vdemo"
+            cls_d = tmp / "cls"
+            src_d.mkdir(parents=True)
+            cls_d.mkdir()
+            (src_d / "Main.java").write_text("\n".join(lines))
+            subprocess.run([javac, "-d", str(cls_d), str(src_d / "Main.java")], check=True)
+            java_out = subprocess.check_output([java, "-cp", str(cls_d), "vdemo.Main"], text=True)
+
+            shard_dir = tmp / "shards"
+            exe_path = tmp / "vdisp_app"
+            subprocess.run(
+                [
+                    "python3", "-m", "tools.muffin", "translate",
+                    "-i", str(cls_d), "-o", str(shard_dir), "--entry", "vdemo.Main", "--shards", "4",
+                ],
+                cwd=REPO_ROOT,
+                check=True,
+            )
+            all_shard_txt = "\n".join(p.read_text() for p in sorted(shard_dir.glob("shard_*.mojo")))
+            self.assertIn("def vd_", all_shard_txt)
+            from tools.muffin.shard import compile_sharded
+
+            compile_sharded(shard_dir, REPO_ROOT, mojo, exe_path)
+            mojo_out = subprocess.check_output([str(exe_path)], text=True)
+            self.assertEqual(mojo_out, java_out)
+
 
 if __name__ == "__main__":
     unittest.main()

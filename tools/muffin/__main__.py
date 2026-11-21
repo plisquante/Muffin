@@ -133,6 +133,7 @@ def cmd_translate(args: argparse.Namespace) -> int:
             out_path,
             shards=max(2, args.shards or 32),
             entry_class=rta_entry,
+            shared_lib=getattr(args, "shared_lib", False),
             reachable_methods=rta_res.reachable_methods,
         )
         print(
@@ -231,7 +232,10 @@ def cmd_build_lib(args: argparse.Namespace) -> int:
     out_dir = Path(args.out)
     shard_dir = out_dir / "shards"
 
-    if getattr(args, "rta", False):
+    if getattr(args, "shards_dir", None):
+        shard_dir = Path(args.shards_dir)
+        print(f"[muffin] reusing pre-emitted shards in {shard_dir}")
+    elif getattr(args, "rta", False):
         rta_entry = entry or "net/minecraft/client/main/Main"
         h, rta_res = _build_rta_hierarchy(src, rta_entry)
         stats, _ = emit_sharded_project(
@@ -241,6 +245,10 @@ def cmd_build_lib(args: argparse.Namespace) -> int:
             entry_class=rta_entry,
             shared_lib=True,
             reachable_methods=rta_res.reachable_methods,
+        )
+        print(
+            f"[muffin] emitted {args.shards} shards in {shard_dir}: {stats.classes_emitted} classes, "
+            f"{stats.methods_emitted} methods"
         )
     else:
         cfs = []
@@ -264,11 +272,10 @@ def cmd_build_lib(args: argparse.Namespace) -> int:
 
         h = Hierarchy.build(cfs)
         stats, _ = emit_sharded_project(h, shard_dir, shards=args.shards, entry_class=entry, shared_lib=True)
-
-    print(
-        f"[muffin] emitted {args.shards} shards in {shard_dir}: {stats.classes_emitted} classes, "
-        f"{stats.methods_emitted} methods"
-    )
+        print(
+            f"[muffin] emitted {args.shards} shards in {shard_dir}: {stats.classes_emitted} classes, "
+            f"{stats.methods_emitted} methods"
+        )
 
     ndk_bin = _find_ndk_bin()
     clang_name = "x86_64-linux-android26-clang" if "x86_64" in args.target_triple else "aarch64-linux-android26-clang"
@@ -312,6 +319,7 @@ def main(argv: list[str] | None = None) -> int:
     t.add_argument("--filter", action="append", help="only include classes matching prefix")
     t.add_argument("--shards", type=int, default=1, help="split output into N separately-compiled .mojo shards")
     t.add_argument("--rta", action="store_true", help="use full closed-world RTA closure across libraries + JDK jmods")
+    t.add_argument("--shared-lib", action="store_true", help="emit Android shared-library entrypoints in sharded main.mojo")
     t.set_defaults(fn=cmd_translate)
     k = sub.add_parser("apk", help="build dual-ABI Mojo Edition Android Launcher APK")
     k.add_argument("--out", help="output .apk path (default: releases/Muffin-Minecraft-Mojo-Edition.apk)")
@@ -322,6 +330,7 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--entry", help="optional Java main class")
     b.add_argument("--filter", action="append", help="only include classes matching prefix")
     b.add_argument("--shards", type=int, default=8, help="number of parallel Mojo shards")
+    b.add_argument("--shards-dir", help="reuse an existing pre-emitted sharded Mojo directory instead of re-translating")
     b.add_argument("--jobs", "-j", type=int, default=None, help="parallel Mojo compile workers")
     b.add_argument("--opt", type=int, default=3, choices=[0, 1, 2, 3], help="Mojo optimization level (0=fast build, 3=max perf)")
     b.add_argument("--target-triple", default="aarch64-unknown-linux-android26", help="Mojo LLVM target triple")

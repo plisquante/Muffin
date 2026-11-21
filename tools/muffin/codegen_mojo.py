@@ -14,7 +14,7 @@ and `MethodIR`s with:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .classfile import Member
 from .hierarchy import ClassInfo, Hierarchy
@@ -187,6 +187,9 @@ class CodegenStats:
     calls_virtual: int = 0
     current_shard: int | None = None
     class_to_shard: dict[str, int] | None = None
+    vdisp_to_shard: dict[tuple[str, str, str], int] | None = None
+    vdisp_needed: set[tuple[str, str, str]] = field(default_factory=set)
+    large_ifaces: set[str] = field(default_factory=set)
 
 
 def _resolve_static_owner(hierarchy: Hierarchy, owner: str, fname: str) -> str | None:
@@ -262,11 +265,48 @@ def _emit_runtime_imports(w) -> None:
     w("")
 
 
+def compress_cid_runs(cids: list[int]) -> list[tuple[int, int]]:
+    """Compress sorted integer class IDs into contiguous inclusive `(lo, hi)` runs."""
+    if not cids:
+        return []
+    runs: list[tuple[int, int]] = []
+    lo = hi = cids[0]
+    for c in cids[1:]:
+        if c == hi + 1:
+            hi = c
+        elif c > hi:
+            runs.append((lo, hi))
+            lo = hi = c
+    runs.append((lo, hi))
+    return runs
+
+
+def _iface_helper_name(iface: str) -> str:
+    return f"_if_{mangle_class(iface)[2:]}"
+
+
+def _emit_runs_binary_tree(w, ind: str, cid_v: str, runs: list[tuple[int, int]]) -> None:
+    if len(runs) <= 4:
+        parts = [
+            f"{cid_v} == Int32({lo})" if lo == hi else f"({cid_v} >= Int32({lo}) and {cid_v} <= Int32({hi}))"
+            for lo, hi in runs
+        ]
+        w(f"{ind}return {' or '.join(parts)}")
+        return
+    mid = len(runs) // 2
+    mid_lo = runs[mid][0]
+    w(f"{ind}if {cid_v} < Int32({mid_lo}):")
+    _emit_runs_binary_tree(w, ind + "    ", cid_v, runs[:mid])
+    w(f"{ind}else:")
+    _emit_runs_binary_tree(w, ind + "    ", cid_v, runs[mid:])
+
+
 def emit_shared_module(
     hierarchy: Hierarchy,
     stats: CodegenStats | None = None,
     *,
     num_shards: int = 0,
+    large_ifaces: set[str] | None = None,
 ) -> tuple[str, list[str]]:
     """Emit `shared.mojo` (minimal runtime `JStatics` when `num_shards > 0`, full structs in single-file mode)."""
     out: list[str] = []
@@ -319,6 +359,17 @@ def emit_shared_module(
     w('                    external_call["free", NoneType](arr.unsafe_offset(i)[].unsafe_value())')
     w('            external_call["free", NoneType](arr.unsafe_bitcast[NoneType]())')
     w("")
+
+    for iface in sorted(large_ifaces or ()):
+        ids = hierarchy.interface_impl_ids.get(iface, [])
+        runs = compress_cid_runs(ids)
+        if not runs:
+            continue
+        hname = _iface_helper_name(iface)
+        exported_syms.append(hname)
+        w(f"def {hname}(cid: Int32) -> Bool:")
+        _emit_runs_binary_tree(w, "    ", "cid", runs)
+        w("")
 
     if num_shards > 0:
         return "\n".join(out), exported_syms
@@ -552,10 +603,7 @@ def emit_mojo_program(
     out: list[str] = []
     w = out.append
 
-    shared_src, _ = emit_shared_module(hierarchy, stats)
-    out.append(shared_src)
-
-    # 3. Pre-lift all methods so Escape Analysis can use inter-procedural receiver summaries
+    # 1. Pre-lift all methods so EA & large-interface scanning run before emission
     lifted_list: list[tuple[ClassInfo, Member, MethodIR]] = []
     for cname in sorted(hierarchy.classes):
         ci = hierarchy.classes[cname]
@@ -563,6 +611,20 @@ def emit_mojo_program(
             if m.code is None:
                 continue
             lifted_list.append((ci, m, lift_method(ci.cf, m)))
+
+    for _, _, ir in lifted_list:
+        for blk in ir.blocks.values():
+            for st in blk.stmts:
+                if st.op in ("instanceof", "checkcast"):
+                    tc = st.args[0]
+                    tci = hierarchy.classes.get(tc)
+                    if tci is not None and tci.cf.is_interface and tc not in stats.large_ifaces:
+                        ids = hierarchy.interface_impl_ids.get(tc, [])
+                        if len(compress_cid_runs(ids)) > 16:
+                            stats.large_ifaces.add(tc)
+
+    shared_src, _ = emit_shared_module(hierarchy, stats, large_ifaces=stats.large_ifaces)
+    out.append(shared_src)
 
     non_escaping_params = compute_non_escaping_params([ir for _, _, ir in lifted_list])
 
@@ -577,6 +639,9 @@ def emit_mojo_program(
         stats.arena_allocs_lowered += len(opt.arena_allocs)
         _emit_method(out, hierarchy, ci, m, ir, opt, ast, stats)
         w("")
+
+    for v_owner, v_mname, v_mdesc in sorted(stats.vdisp_needed):
+        emit_vdisp_function(out, hierarchy, v_owner, v_mname, v_mdesc, stats, export_c_abi=False)
 
     # 4. Optional main() entrypoint
     if entry_class and entry_class in hierarchy.classes:
@@ -1061,9 +1126,9 @@ def _emit_block_stmts(
                     struct_t = mangle_class(owner) + "Data"
                     w(f"{ind}{obj.name}.non_null().unsafe_bitcast[{struct_t}]()[].f_{mname} = {_copy_if_ref(val)}")
         elif op == "instanceof":
-            _emit_instanceof(w, ind, hierarchy, dst, args[0], args[1])
+            _emit_instanceof(w, ind, hierarchy, dst, args[0], args[1], stats)
         elif op == "checkcast":
-            _emit_checkcast(w, ind, hierarchy, dst, args[0], args[1])
+            _emit_checkcast(w, ind, hierarchy, dst, args[0], args[1], stats)
         elif op == "call":
             _emit_call(w, ind, hierarchy, dst, args, opt, stats)
         elif op == "indy":
@@ -1111,7 +1176,16 @@ def _emit_block_stmts(
         w(f"{ind}continue")
 
 
-def _emit_instanceof(w, ind: str, hierarchy: Hierarchy, dst: Val, target_cls: str, obj: Val) -> None:
+def _iface_cond_expr(cid_v: str, runs: list[tuple[int, int]]) -> str:
+    return " or ".join(
+        f"{cid_v} == Int32({lo})" if lo == hi else f"({cid_v} >= Int32({lo}) and {cid_v} <= Int32({hi}))"
+        for lo, hi in runs
+    )
+
+
+def _emit_instanceof(
+    w, ind: str, hierarchy: Hierarchy, dst: Val, target_cls: str, obj: Val, stats: CodegenStats | None = None
+) -> None:
     if target_cls == "java/lang/String":
         w(f"{ind}{dst.name} = Int32(1) if {obj.name}.class_id() == Int32(5) else Int32(0)")
         return
@@ -1122,17 +1196,22 @@ def _emit_instanceof(w, ind: str, hierarchy: Hierarchy, dst: Val, target_cls: st
             if not ids:
                 w(f"{ind}{dst.name} = Int32(0)")
             else:
-                cid_v = f"_icid_{dst.name}"
-                w(f"{ind}var {cid_v} = {obj.name}.class_id()")
-                cond = " or ".join(f"{cid_v} == Int32({c})" for c in ids)
-                w(f"{ind}{dst.name} = Int32(1) if ({cond}) else Int32(0)")
+                runs = compress_cid_runs(ids)
+                if len(runs) > 16 and (stats is None or target_cls in stats.large_ifaces):
+                    w(f"{ind}{dst.name} = Int32(1) if {_iface_helper_name(target_cls)}({obj.name}.class_id()) else Int32(0)")
+                else:
+                    cid_v = f"_icid_{dst.name}"
+                    w(f"{ind}var {cid_v} = {obj.name}.class_id()")
+                    w(f"{ind}{dst.name} = Int32(1) if ({_iface_cond_expr(cid_v, runs)}) else Int32(0)")
         else:
             w(f"{ind}{dst.name} = is_instance({obj.name}, Int32({tci.class_id}), Int32({tci.max_sub_id}))")
     else:
         w(f"{ind}{dst.name} = Int32(0)")
 
 
-def _emit_checkcast(w, ind: str, hierarchy: Hierarchy, dst: Val, target_cls: str, obj: Val) -> None:
+def _emit_checkcast(
+    w, ind: str, hierarchy: Hierarchy, dst: Val, target_cls: str, obj: Val, stats: CodegenStats | None = None
+) -> None:
     if target_cls in hierarchy.classes:
         tci = hierarchy.classes[target_cls]
         if tci.cf.is_interface:
@@ -1142,10 +1221,14 @@ def _emit_checkcast(w, ind: str, hierarchy: Hierarchy, dst: Val, target_cls: str
             if not ids:
                 w(f'{ind}    raise JThrowable(6, "java/lang/ClassCastException")')
             else:
-                w(f"{ind}    var {cid_v} = {obj.name}.class_id()")
-                cond = " or ".join(f"{cid_v} == Int32({c})" for c in ids)
-                w(f"{ind}    if not ({cond}):")
-                w(f'{ind}        raise JThrowable(6, "java/lang/ClassCastException")')
+                runs = compress_cid_runs(ids)
+                if len(runs) > 16 and (stats is None or target_cls in stats.large_ifaces):
+                    w(f"{ind}    if not {_iface_helper_name(target_cls)}({obj.name}.class_id()):")
+                    w(f'{ind}        raise JThrowable(6, "java/lang/ClassCastException")')
+                else:
+                    w(f"{ind}    var {cid_v} = {obj.name}.class_id()")
+                    w(f"{ind}    if not ({_iface_cond_expr(cid_v, runs)}):")
+                    w(f'{ind}        raise JThrowable(6, "java/lang/ClassCastException")')
             w(f"{ind}{dst.name} = {obj.name}.copy()")
         else:
             w(f"{ind}{dst.name} = check_cast({obj.name}, Int32({tci.class_id}), Int32({tci.max_sub_id}))")
@@ -1493,14 +1576,19 @@ def _emit_call(w, ind: str, hierarchy: Hierarchy, dst: Val | None, args: tuple, 
             sub_impls = hierarchy.concrete_targets(owner, mname, mdesc)
             if sub_impls:
                 rhs_dst = dst if (dst is not None and dst.name in opt.live_vars) else None
-                cid_var = f"_cid_{recv.name}_{id(args) & 0xFFFF}"
-                w(f"{ind}var {cid_var} = {recv.name}.class_id()")
-                for idx_s, (sub_cid, impl_owner) in enumerate(sub_impls):
-                    skw = "if" if idx_s == 0 else "elif"
-                    w(f"{ind}{skw} {cid_var} == {sub_cid}:")
-                    _emit_resolved_call(w, ind + "    ", stats, impl_owner, mname, mdesc, recv, cargs, rhs_dst)
-                w(f"{ind}else:")
-                w(f'{ind}    raise JThrowable(8, "AbstractMethodError: {owner}.{mname}")')
+                if len(sub_impls) <= 8:
+                    cid_var = f"_cid_{recv.name}_{id(args) & 0xFFFF}"
+                    w(f"{ind}var {cid_var} = {recv.name}.class_id()")
+                    for idx_s, (sub_cid, impl_owner) in enumerate(sub_impls):
+                        skw = "if" if idx_s == 0 else "elif"
+                        w(f"{ind}{skw} {cid_var} == {sub_cid}:")
+                        _emit_resolved_call_or_builtin(w, ind + "    ", hierarchy, stats, impl_owner, mname, mdesc, recv, cargs, rhs_dst)
+                    w(f"{ind}else:")
+                    w(f'{ind}    raise JThrowable(8, "AbstractMethodError: {owner}.{mname}")')
+                else:
+                    vkey = (owner, mname, mdesc)
+                    stats.vdisp_needed.add(vkey)
+                    _emit_vdisp_call(w, ind, stats, vkey, recv, cargs, rhs_dst)
                 return
 
     resolved_owner = hierarchy.resolve_method(target_owner, mname, mdesc)
@@ -1513,6 +1601,295 @@ def _emit_call(w, ind: str, hierarchy: Hierarchy, dst: Val | None, args: tuple, 
 
     rhs_dst = dst if (dst is not None and dst.name in opt.live_vars) else None
     _emit_resolved_call(w, ind, stats, resolved_owner, mname, mdesc, recv, cargs, rhs_dst)
+
+
+def _vdisp_fn_name(owner: str, mname: str, mdesc: str) -> str:
+    return "vd_" + mangle_method(owner, mname, mdesc)
+
+
+def _emit_resolved_call_or_builtin(
+    w,
+    ind: str,
+    hierarchy: Hierarchy,
+    stats: CodegenStats,
+    impl_owner: str,
+    mname: str,
+    mdesc: str,
+    recv: Val,
+    cargs: tuple,
+    dst: Val | None,
+) -> None:
+    if (impl_owner, mname, mdesc) == ("java/lang/Object", "hashCode", "()I"):
+        if dst is not None:
+            w(f"{ind}{dst.name} = {recv.name}.identity_hash()")
+        else:
+            w(f"{ind}_ = {recv.name}.identity_hash()")
+        return
+    if (impl_owner, mname, mdesc) == ("java/lang/Object", "equals", "(Ljava/lang/Object;)Z"):
+        expr = f"Int32(1) if {recv.name}.same({cargs[0].name}) else Int32(0)"
+        if dst is not None:
+            w(f"{ind}{dst.name} = {expr}")
+        else:
+            w(f"{ind}_ = {expr}")
+        return
+    if hierarchy.resolve_method(impl_owner, mname, mdesc) is None:
+        if dst is not None:
+            w(f"{ind}{dst.name} = {kind_default(dst.kind)}  # native/ext: {impl_owner}.{mname}{mdesc}")
+        else:
+            w(f"{ind}pass  # native/ext: {impl_owner}.{mname}{mdesc}")
+        return
+    _emit_resolved_call(w, ind, stats, impl_owner, mname, mdesc, recv, cargs, dst)
+
+
+def _emit_vdisp_call(
+    w,
+    ind: str,
+    stats: CodegenStats,
+    vkey: tuple[str, str, str],
+    recv: Val,
+    cargs: tuple,
+    dst: Val | None,
+) -> None:
+    from .types import parse_method_desc
+
+    owner, mname, mdesc = vkey
+    vd_name = _vdisp_fn_name(owner, mname, mdesc)
+    is_cross = (
+        stats.current_shard is not None
+        and stats.vdisp_to_shard is not None
+        and stats.vdisp_to_shard.get(vkey) != stats.current_shard
+    )
+    if not is_cross:
+        call_list = ["_s", recv.name, *(a.name for a in cargs)]
+        expr = f"{vd_name}({', '.join(call_list)})"
+        if dst is not None:
+            w(f"{ind}{dst.name} = {expr}")
+        else:
+            w(f"{ind}{expr}")
+        return
+
+    _, ret_t = parse_method_desc(mdesc)
+    if ret_t.is_void:
+        c_ret = "NoneType"
+    else:
+        rk = jtype_to_kind(ret_t)
+        c_ret = "NoneType" if rk == KIND_R else kind_to_mojo(rk)
+    x_args = ["_s", f"{recv.name}.ptr"]
+    for a in cargs:
+        x_args.append(f"{a.name}.ptr" if a.kind == KIND_R else a.name)
+    call_expr = f'external_call["x{vd_name}", {c_ret}]({", ".join(x_args)})'
+    if dst is not None and not ret_t.is_void:
+        if jtype_to_kind(ret_t) == KIND_R:
+            w(f"{ind}{call_expr}")
+            w(f"{ind}if _s[].has_exc:")
+            w(f"{ind}    _s[].has_exc = False")
+            w(f'{ind}    raise JThrowable(_s[].exc_cid, "cross_vd", _s[].exc_obj.copy())')
+            w(f"{ind}{dst.name} = _s[].ret_ref.copy()")
+            w(f"{ind}_s[].ret_ref = JRef()")
+        else:
+            w(f"{ind}var _xvd_{dst.name} = {call_expr}")
+            w(f"{ind}if _s[].has_exc:")
+            w(f"{ind}    _s[].has_exc = False")
+            w(f'{ind}    raise JThrowable(_s[].exc_cid, "cross_vd", _s[].exc_obj.copy())')
+            w(f"{ind}{dst.name} = _xvd_{dst.name}")
+    else:
+        w(f"{ind}{call_expr}")
+        w(f"{ind}if _s[].has_exc:")
+        w(f"{ind}    _s[].has_exc = False")
+        w(f'{ind}    raise JThrowable(_s[].exc_cid, "cross_vd", _s[].exc_obj.copy())')
+        if not ret_t.is_void and jtype_to_kind(ret_t) == KIND_R:
+            w(f"{ind}_s[].ret_ref = JRef()")
+
+
+def emit_vdisp_function(
+    out: list[str],
+    hierarchy: Hierarchy,
+    owner: str,
+    mname: str,
+    mdesc: str,
+    stats: CodegenStats,
+    *,
+    export_c_abi: bool = False,
+) -> None:
+    """Emit shared O(log N) balanced-binary-tree dispatcher for a polymorphic virtual method."""
+    from collections import Counter
+
+    from .types import parse_method_desc
+
+    w = out.append
+    sub_impls = hierarchy.concrete_targets(owner, mname, mdesc)
+    param_types, ret_t = parse_method_desc(mdesc)
+    vd_name = _vdisp_fn_name(owner, mname, mdesc)
+
+    sig = ["_s: JStaticsPtr", "arg0: JRef"]
+    fwd = ["_s", "arg0"]
+    cargs_vals = []
+    for i, pt in enumerate(param_types):
+        k = jtype_to_kind(pt)
+        pname = f"p{i}"
+        sig.append(f"{pname}: {kind_to_mojo(k)}")
+        fwd.append(pname)
+        cargs_vals.append(Val(pname, k))
+
+    ret_k = "V" if ret_t.is_void else jtype_to_kind(ret_t)
+    ret_ann = "" if ret_t.is_void else f" -> {kind_to_mojo(ret_k)}"
+
+    counts = Counter(impl for _, impl in sub_impls)
+    default_impl: str | None = None
+    if counts:
+        top_impl, top_cnt = counts.most_common(1)[0]
+        if top_cnt >= 4 or owner == "java/lang/Object":
+            default_impl = top_impl
+
+    # Build sorted contiguous (lo, hi, impl_owner) intervals excluding default_impl
+    intervals: list[tuple[int, int, str]] = []
+    for cid, impl in sub_impls:
+        if impl == default_impl:
+            continue
+        if intervals and intervals[-1][2] == impl and intervals[-1][1] + 1 == cid:
+            intervals[-1] = (intervals[-1][0], cid, impl)
+        else:
+            intervals.append((cid, cid, impl))
+
+    def emit_leaf_return(ind: str, impl_owner: str | None) -> None:
+        if impl_owner is None:
+            w(f'{ind}raise JThrowable(8, "AbstractMethodError: {owner}.{mname}")')
+            return
+        if (impl_owner, mname, mdesc) == ("java/lang/Object", "hashCode", "()I"):
+            w(f"{ind}return arg0.identity_hash()")
+            return
+        if (impl_owner, mname, mdesc) == ("java/lang/Object", "equals", "(Ljava/lang/Object;)Z"):
+            w(f"{ind}return Int32(1) if arg0.same(p0) else Int32(0)")
+            return
+        if hierarchy.resolve_method(impl_owner, mname, mdesc) is None:
+            w(f"{ind}return" if ret_t.is_void else f"{ind}return {kind_default(ret_k)}")
+            return
+        fn_m = mangle_method(impl_owner, mname, mdesc)
+        is_cross = (
+            stats.current_shard is not None
+            and stats.class_to_shard is not None
+            and stats.class_to_shard.get(impl_owner) != stats.current_shard
+        )
+        if not is_cross:
+            expr = f"{fn_m}({', '.join(fwd)})"
+            if ret_t.is_void:
+                w(f"{ind}{expr}")
+                w(f"{ind}return")
+            else:
+                w(f"{ind}return {expr}")
+            return
+        c_ret = "NoneType" if (ret_t.is_void or ret_k == KIND_R) else kind_to_mojo(ret_k)
+        x_args = ["_s", "arg0.ptr"] + [f"{v.name}.ptr" if v.kind == KIND_R else v.name for v in cargs_vals]
+        cexpr = f'external_call["x_{fn_m}", {c_ret}]({", ".join(x_args)})'
+        if ret_t.is_void:
+            w(f"{ind}{cexpr}")
+            w(f"{ind}if _s[].has_exc:")
+            w(f"{ind}    _s[].has_exc = False")
+            w(f'{ind}    raise JThrowable(_s[].exc_cid, "cross_shard", _s[].exc_obj.copy())')
+            w(f"{ind}return")
+        elif ret_k == KIND_R:
+            w(f"{ind}{cexpr}")
+            w(f"{ind}if _s[].has_exc:")
+            w(f"{ind}    _s[].has_exc = False")
+            w(f'{ind}    raise JThrowable(_s[].exc_cid, "cross_shard", _s[].exc_obj.copy())')
+            w(f"{ind}var _r = _s[].ret_ref.copy()")
+            w(f"{ind}_s[].ret_ref = JRef()")
+            w(f"{ind}return _r")
+        else:
+            w(f"{ind}var _xr = {cexpr}")
+            w(f"{ind}if _s[].has_exc:")
+            w(f"{ind}    _s[].has_exc = False")
+            w(f'{ind}    raise JThrowable(_s[].exc_cid, "cross_shard", _s[].exc_obj.copy())')
+            w(f"{ind}return _xr")
+
+    def emit_btree(ind: str, ivs: list[tuple[int, int, str]]) -> None:
+        if not ivs:
+            emit_leaf_return(ind, default_impl)
+            return
+        if len(ivs) <= 4:
+            for idx_i, (lo, hi, imp) in enumerate(ivs):
+                kw = "if" if idx_i == 0 else "elif"
+                cond = f"_cid == Int32({lo})" if lo == hi else f"(_cid >= Int32({lo}) and _cid <= Int32({hi}))"
+                w(f"{ind}{kw} {cond}:")
+                emit_leaf_return(ind + "    ", imp)
+            w(f"{ind}else:")
+            emit_leaf_return(ind + "    ", default_impl)
+            return
+        mid = len(ivs) // 2
+        w(f"{ind}if _cid < Int32({ivs[mid][0]}):")
+        emit_btree(ind + "    ", ivs[:mid])
+        w(f"{ind}else:")
+        emit_btree(ind + "    ", ivs[mid:])
+
+    # Chunk large interval tables (>32 intervals) so every Mojo function stays tiny
+    chunk_size = 32
+    if len(intervals) <= chunk_size:
+        w(f"def {vd_name}({', '.join(sig)}) raises JThrowable{ret_ann}:")
+        w("    var _cid = arg0.class_id()")
+        emit_btree("    ", intervals)
+        w("")
+    else:
+        chunks = [intervals[i : i + chunk_size] for i in range(0, len(intervals), chunk_size)]
+        chunk_sig = ["_s: JStaticsPtr", "_cid: Int32", *sig[1:]]
+        for c_idx, ch in enumerate(chunks):
+            w(f"def _{vd_name}_c{c_idx}({', '.join(chunk_sig)}) raises JThrowable{ret_ann}:")
+            emit_btree("    ", ch)
+            w("")
+
+        def emit_chunk_tree(ind: str, c_lo: int, c_hi: int) -> None:
+            if c_lo == c_hi:
+                call_expr = f"_{vd_name}_c{c_lo}(_s, _cid, {', '.join(fwd[1:])})"
+                if ret_t.is_void:
+                    w(f"{ind}{call_expr}")
+                    w(f"{ind}return")
+                else:
+                    w(f"{ind}return {call_expr}")
+                return
+            mid = (c_lo + c_hi + 1) // 2
+            mid_cid = chunks[mid][0][0]
+            w(f"{ind}if _cid < Int32({mid_cid}):")
+            emit_chunk_tree(ind + "    ", c_lo, mid - 1)
+            w(f"{ind}else:")
+            emit_chunk_tree(ind + "    ", mid, c_hi)
+
+        w(f"def {vd_name}({', '.join(sig)}) raises JThrowable{ret_ann}:")
+        w("    var _cid = arg0.class_id()")
+        emit_chunk_tree("    ", 0, len(chunks) - 1)
+        w("")
+
+    if export_c_abi:
+        xsig = ["_s: JStaticsPtr", "raw_arg0: OptionalPointer[ObjHeader, MutUntrackedOrigin]"]
+        xfwd = ["_s", "jref_from_raw(raw_arg0)"]
+        for i, pt in enumerate(param_types):
+            k = jtype_to_kind(pt)
+            if k == KIND_R:
+                xsig.append(f"raw_p{i}: OptionalPointer[ObjHeader, MutUntrackedOrigin]")
+                xfwd.append(f"jref_from_raw(raw_p{i})")
+            else:
+                xsig.append(f"p{i}: {kind_to_mojo(k)}")
+                xfwd.append(f"p{i}")
+        c_ret = "NoneType" if (ret_t.is_void or ret_k == KIND_R) else kind_to_mojo(ret_k)
+        w(f'@export("x{vd_name}")')
+        w(f'def _x{vd_name}({", ".join(xsig)}) abi("C") -> {c_ret}:')
+        w("    try:")
+        inner = f"{vd_name}({', '.join(xfwd)})"
+        if ret_t.is_void:
+            w(f"        {inner}")
+            w("        return")
+        elif ret_k == KIND_R:
+            w(f"        _s[].ret_ref = {inner}")
+            w("        return")
+        else:
+            w(f"        return {inner}")
+        w("    except _exc:")
+        w("        _s[].has_exc = True")
+        w("        _s[].exc_cid = _exc.class_id")
+        w("        _s[].exc_obj = _exc.obj.copy()")
+        if ret_t.is_void or ret_k == KIND_R:
+            w("        return")
+        else:
+            w(f"        return {kind_default(ret_k)}")
+        w("")
 
 
 def _emit_resolved_call(
