@@ -19,6 +19,7 @@ from .ir import MethodIR, Stmt, Val
 class OptInfo:
     arena_allocs: set[str] = field(default_factory=set)  # temp names safe for FrameArena
     live_vars: set[str] = field(default_factory=set)  # variable names actually referenced
+    has_loop: bool = False
     inline_candidates: bool = False
 
 
@@ -259,46 +260,69 @@ def optimize_method(
                 break
 
     arena_allocs: set[str] = set()
+    # Global intra-method EA (safe when loop-free) OR block-local EA (safe even inside loops)
+    alloc_sites: set[str] = set()
+    alloc_block: dict[str, int] = {}
+    aliases: dict[str, set[str]] = {}
+    escaped_vars: set[str] = set()
+    alias_blocks: dict[str, set[int]] = {}
+
+    def origins(name: str) -> set[str]:
+        return aliases.get(name, {name})
+
+    def record_use(v: Val, bpc: int) -> None:
+        for org in origins(v.name):
+            alias_blocks.setdefault(org, set()).add(bpc)
+
+    for bpc, blk in ir.blocks.items():
+        for st in blk.stmts:
+            for v in _stmt_reads(st):
+                record_use(v, bpc)
+            if st.op in ("new", "newarray") and st.dst is not None:
+                if st.op == "newarray" or st.args[0] != "java/lang/StringBuilder":
+                    alloc_sites.add(st.dst.name)
+                    alloc_block[st.dst.name] = bpc
+                    aliases[st.dst.name] = {st.dst.name}
+                    alias_blocks.setdefault(st.dst.name, set()).add(bpc)
+            elif st.op == "copy" and st.dst is not None:
+                aliases[st.dst.name] = set(origins(st.args[0].name))
+                for org in aliases[st.dst.name]:
+                    alias_blocks.setdefault(org, set()).add(bpc)
+            elif st.op == "checkcast" and st.dst is not None:
+                aliases[st.dst.name] = set(origins(st.args[1].name))
+                for org in aliases[st.dst.name]:
+                    alias_blocks.setdefault(org, set()).add(bpc)
+            elif st.op == "putstatic":
+                escaped_vars.update(origins(st.args[3].name))
+            elif st.op == "putfield":
+                escaped_vars.update(origins(st.args[4].name))
+            elif st.op == "astore_elem" and st.args[0] == "a":
+                escaped_vars.update(origins(st.args[3].name))
+            elif st.op == "call":
+                _, owner, mname, mdesc, recv, cargs = st.args
+                if recv is not None:
+                    if (owner, mname, mdesc) not in safe_recv:
+                        escaped_vars.update(origins(recv.name))
+                for ca in cargs:
+                    escaped_vars.update(origins(ca.name))
+            elif st.op == "indy":
+                for ca in st.args[3]:
+                    escaped_vars.update(origins(ca.name))
+        if blk.term is not None:
+            for v in _stmt_reads(blk.term):
+                record_use(v, bpc)
+            if blk.term.op == "ret" and blk.term.args:
+                escaped_vars.update(origins(blk.term.args[0].name))
+            elif blk.term.op == "throw":
+                escaped_vars.update(origins(blk.term.args[0].name))
+
+    candidates = alloc_sites - escaped_vars
     if not has_loop:
-        alloc_sites: set[str] = set()
-        aliases: dict[str, set[str]] = {}
-        escaped_vars: set[str] = set()
+        arena_allocs = candidates
+    else:
+        # Inside looping methods, keep allocations whose entire lifetime stays in a single basic block
+        arena_allocs = {
+            s for s in candidates if alias_blocks.get(s, set()) == {alloc_block[s]}
+        }
 
-        def origins(name: str) -> set[str]:
-            return aliases.get(name, {name})
-
-        for blk in ir.blocks.values():
-            for st in blk.stmts:
-                if st.op in ("new", "newarray") and st.dst is not None:
-                    if st.op == "newarray" or st.args[0] != "java/lang/StringBuilder":
-                        alloc_sites.add(st.dst.name)
-                        aliases[st.dst.name] = {st.dst.name}
-                elif st.op == "copy" and st.dst is not None:
-                    aliases[st.dst.name] = set(origins(st.args[0].name))
-                elif st.op == "checkcast" and st.dst is not None:
-                    aliases[st.dst.name] = set(origins(st.args[1].name))
-                elif st.op == "putstatic":
-                    escaped_vars.update(origins(st.args[3].name))
-                elif st.op == "putfield":
-                    escaped_vars.update(origins(st.args[4].name))
-                elif st.op == "astore_elem" and st.args[0] == "a":
-                    escaped_vars.update(origins(st.args[3].name))
-                elif st.op == "call":
-                    cop, owner, mname, mdesc, recv, cargs = st.args
-                    if recv is not None:
-                        if (owner, mname, mdesc) not in safe_recv:
-                            escaped_vars.update(origins(recv.name))
-                    for ca in cargs:
-                        escaped_vars.update(origins(ca.name))
-                elif st.op == "indy":
-                    for ca in st.args[3]:
-                        escaped_vars.update(origins(ca.name))
-            if blk.term is not None:
-                if blk.term.op == "ret" and blk.term.args:
-                    escaped_vars.update(origins(blk.term.args[0].name))
-                elif blk.term.op == "throw":
-                    escaped_vars.update(origins(blk.term.args[0].name))
-
-        arena_allocs = alloc_sites - escaped_vars
-
-    return OptInfo(arena_allocs=arena_allocs, live_vars=live)
+    return OptInfo(arena_allocs=arena_allocs, live_vars=live, has_loop=has_loop)

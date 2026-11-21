@@ -20,17 +20,31 @@ RUNTIME_TEST_MOJO = r"""
 from std.atomic import Atomic
 from std.memory import MutOpaquePointer, Pointer
 from std.origin import MutUntrackedOrigin
+from std.sys import size_of
 from runtime.muffin import (
+    AudioEngine,
     FrameArena,
+    Frustum,
+    GpuInstance,
     JRef,
+    Mat4f,
+    ObjHeader,
+    RhiContext,
+    SectionSnapshot,
+    Vec4f,
     WorkerPool,
+    ZlibCodec,
+    alloc_raw,
     array_get,
     array_len,
     array_set,
     arraycopy,
+    batch_gpu_instances,
+    cull_sections_parallel,
     d2i_j,
     d2l_j,
     fcmp_j,
+    free_raw,
     idiv_j,
     irem_j,
     jarrays_fill_i,
@@ -53,6 +67,8 @@ from runtime.muffin import (
     string_length,
     string_substring,
     string_value,
+    translate_glsl_version,
+    unpack_bit_storage,
 )
 
 def chunk_worker(start: Int, end: Int, raw: MutOpaquePointer[MutUntrackedOrigin]):
@@ -63,6 +79,10 @@ def chunk_worker(start: Int, end: Int, raw: MutOpaquePointer[MutUntrackedOrigin]
     _ = acc[].fetch_add(local)
 
 def main() raises:
+    # 0. Verify 16-byte compact ObjHeader
+    if size_of[ObjHeader]() != 16:
+        raise Error("ObjHeader must be 16 bytes")
+
     # 1. FrameArena mark/restore churn
     var arena = FrameArena()
     for _ in range(100):
@@ -122,6 +142,54 @@ def main() raises:
     array_set[Int32](row1, 2, 99)
     if array_get[Int32](array_get[JRef](grid, 1), 2) != 99:
         raise Error("multi array mismatch")
+
+    # 5. Zlib (libz.so.1) compress + uncompress + CRC32
+    var zlib = ZlibCodec()
+    var raw_in = List[UInt8](length=16, fill=65)
+    var comp_buf = List[UInt8](length=64, fill=0)
+    var decomp_buf = List[UInt8](length=16, fill=0)
+    var in_p = raw_in.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
+    var cmp_p = comp_buf.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
+    var dec_p = decomp_buf.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
+    var clen = UInt64(64)
+    if zlib.compress(cmp_p, clen, in_p, 16) != 0:
+        raise Error("zlib compress failed")
+    var dlen = UInt64(16)
+    if zlib.uncompress(dec_p, dlen, cmp_p, Int(clen)) != 0 or dlen != 16:
+        raise Error("zlib uncompress failed")
+    if zlib.crc32(in_p, 16) != zlib.crc32(dec_p, 16):
+        raise Error("crc32 mismatch")
+
+    # 6. Zero-LWJGL RHI + Blaze3D GLSL shader normalizer + OpenAL probe
+    var rhi = RhiContext(1280, 720, True)
+    rhi.begin_frame()
+    rhi.record_instanced_draw(128, 36)
+    var glsl = translate_glsl_version("#version 150\nout vec4 fragColor;\nvoid main(){}", True)
+    if not glsl.startswith("#version 300 es"):
+        raise Error("glsl translation mismatch")
+    var audio = AudioEngine()
+    _ = audio.available
+
+    # 7. Multi-core World Culling + GPU Instancing + SimpleBitStorage unpack
+    var secs = List[SectionSnapshot](capacity=256)
+    for i in range(256):
+        var snap = SectionSnapshot()
+        snap.min_v = Vec4f(Float32((i % 16) * 16 - 128), 0.0, Float32((i // 16) * 16 - 128), 0.0)
+        snap.max_v = snap.min_v + Vec4f(16.0, 16.0, 16.0, 0.0)
+        snap.non_empty = (i % 2 == 0)
+        secs.append(snap^)
+    var vis = cull_sections_parallel(pool, secs.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin](), 256, Frustum(), Vec4f(0, 64, 0, 0))
+    if vis != 128:
+        raise Error("world cull count mismatch")
+
+    var packed = List[UInt64]()
+    packed.append(0x00000000_00000041)
+    packed.append(0)
+    var ids = List[Int32](length=32, fill=0)
+    unpack_bit_storage(packed.unsafe_ptr(), ids.unsafe_ptr(), 4, 4)
+    _ = len(packed)
+    if ids[0] != 1 or ids[1] != 4:
+        raise Error("bitstorage unpack mismatch")
 
     print("RUNTIME_ALL_OK")
 """

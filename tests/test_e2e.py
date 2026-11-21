@@ -279,6 +279,8 @@ class MuffinE2ETest(unittest.TestCase):
         self.assertGreater(stats.classes_emitted, 10)
         self.assertGreater(stats.structured_methods, stats.dispatch_methods)
         self.assertIn("struct C_net_minecraft_world_phys_Vec3Data:", code)
+        self.assertIn("return Float32(jmath_sin(p0))", code)
+        self.assertIn("return p1 if p0 < p1 else (p2 if p0 > p2 else p0)", code)
         self.assertGreater(len(h.classes), 40000)
 
         mojo = _find_mojo()
@@ -292,6 +294,91 @@ class MuffinE2ETest(unittest.TestCase):
                     check=True,
                 )
                 self.assertTrue(opath.exists())
+
+                from tools.muffin.shard import emit_sharded_project
+
+                mc_shards = Path(d) / "mc_shards"
+                s_stats, shard_files = emit_sharded_project(sub_h, mc_shards, shards=2)
+                self.assertEqual(s_stats.classes_emitted, stats.classes_emitted)
+                built_objs = 0
+                for sf in shard_files:
+                    if sf.name.startswith("shard_"):
+                        so = sf.with_suffix(".o")
+                        subprocess.run(
+                            [mojo, "build", "--emit", "object", "-I", str(REPO_ROOT), str(sf), "-o", str(so)],
+                            check=True,
+                        )
+                        self.assertTrue(so.exists())
+                        built_objs += 1
+                self.assertGreaterEqual(built_objs, 2)
+
+    def test_sharded_cross_object_compile(self) -> None:
+        javac = shutil.which("javac")
+        java = shutil.which("java")
+        mojo = _find_mojo()
+        self.assertIsNotNone(javac)
+        self.assertIsNotNone(java)
+        self.assertIsNotNone(mojo)
+
+        pkg_b = r"""
+package pkgb;
+public class Box {
+    public int v;
+    public Box(int v) { this.v = v; }
+    public static Box make(int x) { return new Box(x * 3); }
+    public int checkedDiv(int d) { return this.v / d; }
+}
+"""
+        pkg_a = r"""
+package pkga;
+import pkgb.Box;
+public class App {
+    public static void main(String[] args) {
+        Box b = Box.make(14);
+        System.out.println(b.v);
+        try {
+            System.out.println(b.checkedDiv(0));
+        } catch (ArithmeticException e) {
+            System.out.println("CAUGHT_CROSS_SHARD");
+        }
+        int total = 0;
+        for (int i = 0; i < 50000; i++) {
+            Box tmp = new Box(i);
+            total += tmp.v;
+        }
+        System.out.println(total);
+    }
+}
+"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            (tmp / "src" / "pkgb").mkdir(parents=True)
+            (tmp / "src" / "pkga").mkdir(parents=True)
+            cls = tmp / "cls"
+            cls.mkdir()
+            (tmp / "src" / "pkgb" / "Box.java").write_text(pkg_b)
+            (tmp / "src" / "pkga" / "App.java").write_text(pkg_a)
+            subprocess.run(
+                [javac, "-d", str(cls), str(tmp / "src" / "pkgb" / "Box.java"), str(tmp / "src" / "pkga" / "App.java")],
+                check=True,
+            )
+            java_out = subprocess.check_output([java, "-cp", str(cls), "pkga.App"], text=True)
+
+            shard_dir = tmp / "shards"
+            exe_path = tmp / "sharded_app"
+            subprocess.run(
+                [
+                    "python3", "-m", "tools.muffin", "translate",
+                    "-i", str(cls), "-o", str(shard_dir), "--entry", "pkga.App", "--shards", "2",
+                ],
+                cwd=REPO_ROOT,
+                check=True,
+            )
+            from tools.muffin.shard import compile_sharded
+
+            compile_sharded(shard_dir, REPO_ROOT, mojo, exe_path)
+            mojo_out = subprocess.check_output([str(exe_path)], text=True)
+            self.assertEqual(mojo_out, java_out)
 
 
 if __name__ == "__main__":

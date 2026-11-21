@@ -46,14 +46,19 @@ def _noop_drop(p: Pointer[ObjHeader, MutUntrackedOrigin]):
 
 
 struct ObjHeader:
-    """Header at offset 0 of every heap or arena Java object."""
+    """Compact 16-byte header at offset 0 of every heap or arena Java object.
 
-    var rc: Atomic[Int64]
-    var class_id: Int32
-    var flags: Int32
-    var vtable: OptionalPointer[RawFn, MutUntrackedOrigin]
+    Layout:
+      - rc (4B): Atomic[Int32] reference count
+      - meta (4B): bits 0..23 = class_id (up to 16.7M classes), bits 24..31 = flags
+      - drop (8B): DropFn pointer
+    """
+
+    var rc: Atomic[Int32]
+    var meta: UInt32
     var drop: DropFn
 
+    @always_inline
     def __init__(
         out self,
         class_id: Int32,
@@ -61,22 +66,27 @@ struct ObjHeader:
         drop: DropFn,
         flags: Int32 = 0,
     ):
-        self.rc = Atomic[Int64](1)
-        self.class_id = class_id
-        self.flags = flags
-        self.vtable = vtable
+        self.rc = Atomic[Int32](1)
+        self.meta = (UInt32(class_id) & 0x00FFFFFF) | (UInt32(flags) << 24)
         self.drop = drop
 
+    @always_inline
     def __init__(
         out self,
         class_id: Int32,
         flags: Int32,
     ):
-        self.rc = Atomic[Int64](1)
-        self.class_id = class_id
-        self.flags = flags
-        self.vtable = {}
+        self.rc = Atomic[Int32](1)
+        self.meta = (UInt32(class_id) & 0x00FFFFFF) | (UInt32(flags) << 24)
         self.drop = _noop_drop
+
+    @always_inline
+    def class_id(self) -> Int32:
+        return Int32(self.meta & 0x00FFFFFF)
+
+    @always_inline
+    def flags(self) -> Int32:
+        return Int32(self.meta >> 24)
 
 
 struct JRef(Copyable, Defaultable, Writable):
@@ -97,14 +107,14 @@ struct JRef(Copyable, Defaultable, Writable):
         self.ptr = copy.ptr
         if self.ptr:
             var raw = self.ptr.unsafe_value()
-            if raw[].flags == 0:
+            if (raw[].meta >> 24) == 0:
                 _ = raw[].rc.fetch_add(1)
 
     @always_inline
     def __deinit__(deinit self):
         if self.ptr:
             var raw = self.ptr.unsafe_value()
-            if raw[].flags == 0:
+            if (raw[].meta >> 24) == 0:
                 if raw[].rc.fetch_sub(1) == 1:
                     raw[].drop(raw)
 
@@ -112,7 +122,7 @@ struct JRef(Copyable, Defaultable, Writable):
         if not self.ptr:
             writer.write("null")
         else:
-            writer.write("JRef(class=", self.ptr.unsafe_value()[].class_id, ")")
+            writer.write("JRef(class=", self.ptr.unsafe_value()[].class_id(), ")")
 
     @always_inline
     def is_null(self) -> Bool:
@@ -128,7 +138,7 @@ struct JRef(Copyable, Defaultable, Writable):
     def class_id(self) -> Int32:
         if not self.ptr:
             return -1
-        return self.ptr.unsafe_value()[].class_id
+        return self.ptr.unsafe_value()[].class_id()
 
     @always_inline
     def same(self, other: Self) -> Bool:
@@ -144,6 +154,17 @@ struct JRef(Copyable, Defaultable, Writable):
             return 0
         var addr = UInt64(Int(self.ptr.unsafe_value()))
         return Int32((addr >> 4) ^ (addr >> 32))
+
+
+@always_inline
+def jref_from_raw(raw: OptionalPointer[ObjHeader, MutUntrackedOrigin]) -> JRef:
+    """Reconstructs an owned JRef from a raw ObjHeader pointer passed across C ABI."""
+    if raw:
+        var p = raw.unsafe_value()
+        if (p[].meta >> 24) == 0:
+            _ = p[].rc.fetch_add(1)
+        return JRef(p)
+    return JRef()
 
 
 @fieldwise_init

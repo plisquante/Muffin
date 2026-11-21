@@ -1,5 +1,6 @@
 """Muffin zero-GC, multicore Mojo 1.2 JVM runtime."""
 
+from .al_audio import AudioEngine
 from .arena import ArenaMark, FrameArena
 from .core import (
     CID_ARRAY_PRIM,
@@ -36,6 +37,7 @@ from .core import (
     idiv_j,
     irem_j,
     is_instance,
+    jref_from_raw,
     ldiv_j,
     lrem_j,
     new_array,
@@ -56,6 +58,7 @@ from .core import (
     string_substring,
     string_value,
 )
+from .io_zip import ZlibCodec
 from .jdk import (
     jarrays_fill_i,
     jint_bit_count,
@@ -86,3 +89,23 @@ from .jdk import (
     jsys_nano_time,
 )
 from .pool import RangeTaskFn, WorkerPool, cpu_count, parallel_for_range
+from .rhi import (
+    RHI_GLES3,
+    RHI_HEADLESS,
+    RHI_OPENGL,
+    RHI_VULKAN,
+    RhiCaps,
+    RhiContext,
+    RhiStats,
+    probe_rhi_caps,
+    translate_glsl_version,
+)
+from .simd_math import Mat4f, Vec4f, simd_cross3, simd_dot3, simd_normalize3, unpack_bit_storage
+from .world_render import (
+    Frustum,
+    GpuInstance,
+    GpuParticle,
+    SectionSnapshot,
+    batch_gpu_instances,
+    cull_sections_parallel,
+)

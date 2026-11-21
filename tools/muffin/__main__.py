@@ -87,6 +87,7 @@ def cmd_translate(args: argparse.Namespace) -> int:
     from .codegen_mojo import emit_mojo_program
     from .hierarchy import Hierarchy
     from .indy import IndyDesugarer
+    from .shard import emit_sharded_project
 
     src = Path(args.input) if args.input else _default_jar()
     cfs = []
@@ -110,8 +111,19 @@ def cmd_translate(args: argparse.Namespace) -> int:
 
     h = Hierarchy.build(cfs)
     entry = args.entry.replace(".", "/") if args.entry else None
-    code, stats = emit_mojo_program(h, entry_class=entry)
     out_path = Path(args.out)
+
+    if args.shards and args.shards > 1:
+        stats, files = emit_sharded_project(h, out_path, shards=args.shards, entry_class=entry)
+        print(
+            f"[muffin] emitted {len(files)} sharded files in {out_path}: {stats.classes_emitted} classes, "
+            f"{stats.methods_emitted} methods ({stats.structured_methods} structured, "
+            f"{stats.dispatch_methods} dispatch), {stats.arena_allocs_lowered} EA arena allocs, "
+            f"{stats.calls_devirtualized} devirt / {stats.calls_virtual} virtual calls"
+        )
+        return 0
+
+    code, stats = emit_mojo_program(h, entry_class=entry)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(code)
     print(
@@ -166,9 +178,10 @@ def main(argv: list[str] | None = None) -> int:
     r.set_defaults(fn=cmd_rta)
     t = sub.add_parser("translate", help="translate a jar or class dir to Mojo 1.2")
     t.add_argument("--input", "-i", help="jar file or directory of .class files (default: current client.jar)")
-    t.add_argument("--out", "-o", required=True, help="output .mojo path")
+    t.add_argument("--out", "-o", required=True, help="output .mojo path (or directory when --shards > 1)")
     t.add_argument("--entry", help="optional Java main class (e.g. demo.Main)")
     t.add_argument("--filter", action="append", help="only include classes matching prefix")
+    t.add_argument("--shards", type=int, default=1, help="split output into N separately-compiled .mojo shards")
     t.set_defaults(fn=cmd_translate)
     args = ap.parse_args(argv)
     return args.fn(args)

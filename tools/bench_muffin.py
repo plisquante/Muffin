@@ -60,14 +60,10 @@ public class Main {
     static int eaLoop(int n) {
         int acc = 0;
         for (int i = 0; i < n; i++) {
-            acc += oneAlloc(i);
+            Pair p = new Pair(i, i + 7);
+            acc += p.a * 3 + p.b;
         }
         return acc;
-    }
-
-    static int oneAlloc(int i) {
-        Pair p = new Pair(i, i + 7);
-        return p.a * 3 + p.b;
     }
 
     public static void main(String[] args) {
@@ -99,10 +95,14 @@ def _find_mojo() -> str:
 
 MULTICORE_CHUNK_MOJO = r"""
 from std.atomic import Atomic
+from std.collections import List
 from std.memory import MutOpaquePointer, Pointer
 from std.origin import MutUntrackedOrigin
 from std.time import perf_counter_ns
-from runtime.muffin import WorkerPool, cpu_count, jarrays_fill_i
+from runtime.muffin import (
+    WorkerPool, cpu_count, Frustum, SectionSnapshot, Vec4f, cull_sections_parallel,
+    probe_rhi_caps, ZlibCodec,
+)
 
 struct ChunkSimCtx:
     var sections: Int
@@ -124,7 +124,7 @@ def sim_section_range(start: Int, end: Int, raw: MutOpaquePointer[MutUntrackedOr
         local += Int64(acc.reduce_add())
     _ = ctx[].checksum.fetch_add(local)
 
-def main():
+def main() raises:
     var sections = 2048
     var ctx1 = ChunkSimCtx(sections)
     var t0 = perf_counter_ns()
@@ -138,6 +138,43 @@ def main():
     var t3 = perf_counter_ns()
 
     print("cpus=", cpu_count(), "single_ms=", (t1 - t0) // 1_000_000, "multicore_ms=", (t3 - t2) // 1_000_000, "check_ok=", ctx1.checksum.load() == ctxN.checksum.load())
+
+    # 3-stage parallel frustum/section cull benchmark (16,384 sections)
+    var total_secs = 16384
+    var snaps = List[SectionSnapshot](capacity=total_secs)
+    for i in range(total_secs):
+        var cx = Float32((i % 64) * 16 - 512)
+        var cz = Float32(((i // 64) % 64) * 16 - 512)
+        var cy = Float32((i // 4096) * 16)
+        snaps.append(SectionSnapshot(Vec4f(cx, cy, cz, 0.0), Vec4f(cx + 16.0, cy + 16.0, cz + 16.0, 0.0), True, UInt64(0xFFFFFFFFF), UInt8(0), False))
+    var fr = Frustum()
+    var t4 = Int64(perf_counter_ns())
+    var vis_count = 0
+    for _ in range(100):
+        vis_count = cull_sections_parallel(
+            pool,
+            Pointer[SectionSnapshot, _](to=snaps[0]).unsafe_origin_cast[MutUntrackedOrigin](),
+            total_secs,
+            fr,
+            Vec4f(0.0, 64.0, 0.0, 0.0),
+        )
+    var t5 = Int64(perf_counter_ns())
+    var cull_us = (t5 - t4) // 100_000
+    if cull_us < 0:
+        cull_us = 0
+    _ = len(snaps)
+    var rhi = probe_rhi_caps()
+    var crc_buf = List[UInt8](capacity=64)
+    for k in range(64):
+        crc_buf.append(UInt8(k))
+    var z_ok = False
+    try:
+        var zc = ZlibCodec()
+        z_ok = zc.crc32(Pointer[UInt8, _](to=crc_buf[0]).unsafe_origin_cast[MutUntrackedOrigin](), 64) > 0
+    except:
+        z_ok = False
+    _ = len(crc_buf)
+    print("cull_sections=", total_secs, "visible=", vis_count, "cull_us_per_pass=", cull_us, "vulkan=", rhi.has_vulkan_lib, "gl=", rhi.has_gl_lib, "zlib_ok=", z_ok)
 """
 
 
