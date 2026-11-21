@@ -182,6 +182,21 @@ public class Main {
         System.out.println("sum=" + (p1.x() + p1.y()) + ",flag=" + true);
         System.out.println(classify(p1));
         System.out.println(classify("hi"));
+
+        // Float/Double bit-casts, extended Math, and multi-type System.arraycopy
+        System.out.println(Float.floatToRawIntBits(1.5f));
+        System.out.println(Double.doubleToRawLongBits(-2.25));
+        System.out.println((long) Math.pow(2.0, 10.0));
+        System.out.println((long) Math.cbrt(27.0));
+        System.out.println(Math.round(3.75));
+        byte[] bs = new byte[] { 10, 20, 30, 40 };
+        byte[] bd = new byte[4];
+        System.arraycopy(bs, 1, bd, 0, 3);
+        System.out.println((int) bd[0] + "," + (int) bd[2]);
+        String[] ss = new String[] { "a", "b", "c" };
+        String[] sd = new String[3];
+        System.arraycopy(ss, 1, sd, 0, 2);
+        System.out.println(sd[0] + ":" + sd[1]);
     }
 }
 """

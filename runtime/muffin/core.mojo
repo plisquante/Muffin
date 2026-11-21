@@ -32,6 +32,10 @@ comptime CID_STRING_BUILDER: Int32 = 6
 comptime CID_THROWABLE: Int32 = 7
 comptime CID_ARRAY_PRIM: Int32 = 8
 comptime CID_ARRAY_REF: Int32 = 9
+comptime CID_ARRAY_B1: Int32 = 10
+comptime CID_ARRAY_B2: Int32 = 11
+comptime CID_ARRAY_B4: Int32 = 12
+comptime CID_ARRAY_B8: Int32 = 13
 
 
 @fieldwise_init
@@ -319,6 +323,22 @@ def arraycopy[T: Copyable & Deinitable](
     else:
         for i in range(Int(length)):
             array_set[T](dst, dst_pos + Int32(i), array_get[T](src, src_pos + Int32(i)))
+
+
+def arraycopy_any(
+    src: JRef, src_pos: Int32, dst: JRef, dst_pos: Int32, length: Int32
+) raises JThrowable:
+    var scid = src.class_id()
+    if scid == CID_ARRAY_REF:
+        arraycopy[JRef](src, src_pos, dst, dst_pos, length)
+    elif scid == CID_ARRAY_B1:
+        arraycopy[Int8](src, src_pos, dst, dst_pos, length)
+    elif scid == CID_ARRAY_B2:
+        arraycopy[Int16](src, src_pos, dst, dst_pos, length)
+    elif scid == CID_ARRAY_B8:
+        arraycopy[Int64](src, src_pos, dst, dst_pos, length)
+    else:
+        arraycopy[Int32](src, src_pos, dst, dst_pos, length)
 
 
 # --------------------------------------------------------------------------- #

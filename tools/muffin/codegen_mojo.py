@@ -102,17 +102,77 @@ BUILTIN_CALLS = {
     ("java/lang/Math", "max", "(DD)D"): "max_d",
     ("java/lang/Math", "sin", "(D)D"): "math_sin",
     ("java/lang/Math", "cos", "(D)D"): "math_cos",
+    ("java/lang/Math", "tan", "(D)D"): "math_tan",
+    ("java/lang/Math", "asin", "(D)D"): "math_asin",
+    ("java/lang/Math", "acos", "(D)D"): "math_acos",
+    ("java/lang/Math", "atan", "(D)D"): "math_atan",
     ("java/lang/Math", "sqrt", "(D)D"): "math_sqrt",
+    ("java/lang/Math", "cbrt", "(D)D"): "math_cbrt",
+    ("java/lang/Math", "exp", "(D)D"): "math_exp",
+    ("java/lang/Math", "log", "(D)D"): "math_log",
+    ("java/lang/Math", "log10", "(D)D"): "math_log10",
+    ("java/lang/Math", "pow", "(DD)D"): "math_pow",
+    ("java/lang/Math", "hypot", "(DD)D"): "math_hypot",
     ("java/lang/Math", "floor", "(D)D"): "math_floor",
     ("java/lang/Math", "ceil", "(D)D"): "math_ceil",
+    ("java/lang/Math", "round", "(D)J"): "math_round_d",
+    ("java/lang/Math", "round", "(F)I"): "math_round_f",
+    ("java/lang/Math", "signum", "(D)D"): "math_signum_d",
+    ("java/lang/Math", "signum", "(F)F"): "math_signum_f",
     ("java/lang/Math", "atan2", "(DD)D"): "math_atan2",
+    ("java/lang/StrictMath", "sin", "(D)D"): "math_sin",
+    ("java/lang/StrictMath", "cos", "(D)D"): "math_cos",
+    ("java/lang/StrictMath", "sqrt", "(D)D"): "math_sqrt",
+    ("java/lang/StrictMath", "floor", "(D)D"): "math_floor",
+    ("java/lang/StrictMath", "ceil", "(D)D"): "math_ceil",
+    ("java/lang/StrictMath", "atan2", "(DD)D"): "math_atan2",
+    ("java/lang/StrictMath", "pow", "(DD)D"): "math_pow",
+    ("java/lang/StrictMath", "exp", "(D)D"): "math_exp",
+    ("java/lang/StrictMath", "log", "(D)D"): "math_log",
+    ("java/lang/Float", "floatToRawIntBits", "(F)I"): "float_to_bits",
+    ("java/lang/Float", "floatToIntBits", "(F)I"): "float_to_bits",
+    ("java/lang/Float", "intBitsToFloat", "(I)F"): "bits_to_float",
+    ("java/lang/Float", "isNaN", "(F)Z"): "float_isnan",
+    ("java/lang/Float", "isInfinite", "(F)Z"): "float_isinf",
+    ("java/lang/Double", "doubleToRawLongBits", "(D)J"): "double_to_bits",
+    ("java/lang/Double", "doubleToLongBits", "(D)J"): "double_to_bits",
+    ("java/lang/Double", "longBitsToDouble", "(J)D"): "bits_to_double",
+    ("java/lang/Double", "isNaN", "(D)Z"): "double_isnan",
+    ("java/lang/Double", "isInfinite", "(D)Z"): "double_isinf",
     ("java/util/Objects", "equals", "(Ljava/lang/Object;Ljava/lang/Object;)Z"): "objects_eq",
     ("java/util/Objects", "hashCode", "(Ljava/lang/Object;)I"): "objects_hash",
     ("java/util/Objects", "requireNonNull", "(Ljava/lang/Object;)Ljava/lang/Object;"): "id_arg0_ref",
     ("java/lang/System", "nanoTime", "()J"): "sys_nano",
     ("java/lang/System", "currentTimeMillis", "()J"): "sys_millis",
+    ("java/lang/System", "identityHashCode", "(Ljava/lang/Object;)I"): "objects_hash",
     ("java/lang/System", "arraycopy", "(Ljava/lang/Object;ILjava/lang/Object;II)V"): "sys_arraycopy",
+    ("java/lang/Runtime", "availableProcessors", "()I"): "rt_cpus",
+    ("java/lang/Thread", "sleep", "(J)V"): "thread_sleep",
+    ("java/lang/Thread", "onSpinWait", "()V"): "noop",
     ("java/util/Arrays", "fill", "([II)V"): "arrays_fill_i",
+    ("jdk/internal/misc/Unsafe", "allocateMemory", "(J)J"): "unsafe_alloc",
+    ("jdk/internal/misc/Unsafe", "reallocateMemory", "(JJ)J"): "unsafe_realloc",
+    ("jdk/internal/misc/Unsafe", "freeMemory", "(J)V"): "unsafe_free",
+    ("jdk/internal/misc/Unsafe", "setMemory", "(JJB)V"): "unsafe_memset",
+    ("jdk/internal/misc/Unsafe", "copyMemory", "(JJJ)V"): "unsafe_memcpy",
+    ("jdk/internal/misc/Unsafe", "getByte", "(J)B"): "unsafe_get_i8",
+    ("jdk/internal/misc/Unsafe", "putByte", "(JB)V"): "unsafe_put_i8",
+    ("jdk/internal/misc/Unsafe", "getShort", "(J)S"): "unsafe_get_i16",
+    ("jdk/internal/misc/Unsafe", "putShort", "(JS)V"): "unsafe_put_i16",
+    ("jdk/internal/misc/Unsafe", "getInt", "(J)I"): "unsafe_get_i32",
+    ("jdk/internal/misc/Unsafe", "putInt", "(JI)V"): "unsafe_put_i32",
+    ("jdk/internal/misc/Unsafe", "getLong", "(J)J"): "unsafe_get_i64",
+    ("jdk/internal/misc/Unsafe", "putLong", "(JJ)V"): "unsafe_put_i64",
+    ("jdk/internal/misc/Unsafe", "getFloat", "(J)F"): "unsafe_get_f32",
+    ("jdk/internal/misc/Unsafe", "putFloat", "(JF)V"): "unsafe_put_f32",
+    ("jdk/internal/misc/Unsafe", "getDouble", "(J)D"): "unsafe_get_f64",
+    ("jdk/internal/misc/Unsafe", "putDouble", "(JD)V"): "unsafe_put_f64",
+    ("sun/misc/Unsafe", "allocateMemory", "(J)J"): "unsafe_alloc",
+    ("sun/misc/Unsafe", "freeMemory", "(J)V"): "unsafe_free",
+    ("sun/misc/Unsafe", "getInt", "(J)I"): "unsafe_get_i32",
+    ("sun/misc/Unsafe", "putInt", "(JI)V"): "unsafe_put_i32",
+    ("sun/misc/Unsafe", "getLong", "(J)J"): "unsafe_get_i64",
+    ("sun/misc/Unsafe", "putLong", "(JJ)V"): "unsafe_put_i64",
 }
 
 
@@ -127,6 +187,22 @@ class CodegenStats:
     calls_virtual: int = 0
     current_shard: int | None = None
     class_to_shard: dict[str, int] | None = None
+
+
+def _resolve_static_owner(hierarchy: Hierarchy, owner: str, fname: str) -> str | None:
+    cur: str | None = owner
+    seen: set[str] = set()
+    while cur and cur in hierarchy.classes and cur not in seen:
+        seen.add(cur)
+        ci = hierarchy.classes[cur]
+        if any(fl.name == fname for fl in ci.static_fields):
+            return cur
+        for iface in ci.cf.interfaces:
+            res = _resolve_static_owner(hierarchy, iface, fname)
+            if res is not None:
+                return res
+        cur = ci.cf.super_name
+    return owner if owner in hierarchy.classes else None
 
 
 def _escape_mojo_str(s: str) -> str:
@@ -152,33 +228,47 @@ def _escape_mojo_str(s: str) -> str:
 
 def _emit_runtime_imports(w) -> None:
     w("from std.ffi import external_call")
-    w("from std.memory import OptionalPointer, Pointer")
+    w("from std.memory import MutOpaquePointer, OptionalPointer, Pointer")
     w("from std.origin import MutUntrackedOrigin")
     w("from std.sys import size_of")
     w("from runtime.muffin import (")
     for sym in (
-        "ArenaMark", "FLAG_ARENA", "FrameArena", "JArrayData", "JRef", "JThrowable",
+        "ArenaMark", "CID_ARRAY_B1", "CID_ARRAY_B2", "CID_ARRAY_B4", "CID_ARRAY_B8",
+        "CID_ARRAY_REF", "FLAG_ARENA", "FrameArena", "JArrayData", "JRef", "JThrowable",
         "ObjHeader", "RawFn", "alloc_arena_obj", "alloc_raw", "array_get", "array_len",
-        "array_set", "arraycopy", "check_cast", "d2i_j", "d2l_j", "dcmp_j", "f2i_j",
-        "f2l_j", "fcmp_j", "free_raw", "idiv_j", "irem_j", "is_instance", "jarrays_fill_i",
+        "array_set", "arraycopy", "arraycopy_any", "check_cast", "d2i_j", "d2l_j",
+        "dcmp_j", "f2i_j", "f2l_j", "fcmp_j", "free_raw", "idiv_j", "irem_j", "is_instance",
+        "jarrays_fill_i", "jbits_to_double", "jbits_to_float", "jdouble_isinf",
+        "jdouble_isnan", "jdouble_to_bits", "jfloat_isinf", "jfloat_isnan", "jfloat_to_bits",
         "jint_bit_count", "jint_clz", "jint_ctz", "jint_parse", "jint_to_string",
         "jlong_bit_count", "jlong_clz", "jlong_to_string", "jmath_abs_d", "jmath_abs_f",
-        "jmath_abs_i", "jmath_abs_l", "jmath_atan2", "jmath_ceil", "jmath_cos",
-        "jmath_floor", "jmath_max_d", "jmath_max_f", "jmath_max_i", "jmath_min_d",
-        "jmath_min_f", "jmath_min_i", "jmath_sin", "jmath_sqrt", "jref_from_raw",
-        "jsys_current_millis", "jsys_nano_time", "ldiv_j", "lrem_j", "new_array",
-        "new_array_arena", "new_multi_array", "new_sb", "new_string", "sb_append_bool",
-        "sb_append_char", "sb_append_str", "sb_append_val", "sb_to_string", "string_char_at",
-        "string_concat", "string_equals", "string_hash", "string_length",
-        "string_substring", "string_value",
+        "jmath_abs_i", "jmath_abs_l", "jmath_acos", "jmath_asin", "jmath_atan", "jmath_atan2",
+        "jmath_cbrt", "jmath_ceil", "jmath_cos", "jmath_exp", "jmath_floor", "jmath_hypot",
+        "jmath_log", "jmath_log10", "jmath_max_d", "jmath_max_f", "jmath_max_i",
+        "jmath_min_d", "jmath_min_f", "jmath_min_i", "jmath_pow", "jmath_round_d",
+        "jmath_round_f", "jmath_signum_d", "jmath_signum_f", "jmath_sin", "jmath_sqrt",
+        "jmath_tan", "jref_from_raw", "jruntime_cpus", "jsys_current_millis", "jsys_nano_time",
+        "jthread_sleep", "junsafe_alloc", "junsafe_free", "junsafe_get_f32", "junsafe_get_f64",
+        "junsafe_get_i16", "junsafe_get_i32", "junsafe_get_i64", "junsafe_get_i8",
+        "junsafe_memcpy", "junsafe_memset", "junsafe_put_f32", "junsafe_put_f64",
+        "junsafe_put_i16", "junsafe_put_i32", "junsafe_put_i64", "junsafe_put_i8",
+        "junsafe_realloc", "ldiv_j", "lrem_j", "new_array", "new_array_arena",
+        "new_multi_array", "new_sb", "new_string", "sb_append_bool", "sb_append_char",
+        "sb_append_str", "sb_append_val", "sb_to_string", "string_char_at", "string_concat",
+        "string_equals", "string_hash", "string_length", "string_substring", "string_value",
     ):
         w(f"    {sym},")
     w(")")
     w("")
 
 
-def emit_shared_module(hierarchy: Hierarchy, stats: CodegenStats | None = None) -> tuple[str, list[str]]:
-    """Emit `shared.mojo` containing `JStatics`, all class structs, and allocators."""
+def emit_shared_module(
+    hierarchy: Hierarchy,
+    stats: CodegenStats | None = None,
+    *,
+    num_shards: int = 0,
+) -> tuple[str, list[str]]:
+    """Emit `shared.mojo` (minimal runtime `JStatics` when `num_shards > 0`, full structs in single-file mode)."""
     out: list[str] = []
     w = out.append
     exported_syms = ["JStatics", "JStaticsPtr"]
@@ -193,25 +283,45 @@ def emit_shared_module(hierarchy: Hierarchy, stats: CodegenStats | None = None) 
     w("    var exc_cid: Int32")
     w("    var exc_obj: JRef")
     w("    var ret_ref: JRef")
+    w("    var shard_statics: OptionalPointer[OptionalPointer[NoneType, MutUntrackedOrigin], MutUntrackedOrigin]")
+    w("    var shard_count: Int32")
+
     static_fields: list[tuple[str, str, str]] = []
-    for cname in sorted(hierarchy.classes):
-        ci = hierarchy.classes[cname]
-        for fl in ci.static_fields:
-            sname = f"sf_{mangle_class(cname)[2:]}_{safe_ident(fl.name)}"
-            mtype = kind_to_mojo(jtype_to_kind(JType(fl.descriptor)))
-            mdef = kind_default(jtype_to_kind(JType(fl.descriptor)))
-            static_fields.append((sname, mtype, mdef))
-    for sname, mtype, _ in static_fields:
-        w(f"    var {sname}: {mtype}")
-    w("    def __init__(out self):")
+    if num_shards == 0:
+        for cname in sorted(hierarchy.classes):
+            ci = hierarchy.classes[cname]
+            for fl in ci.static_fields:
+                sname = f"sf_{mangle_class(cname)[2:]}_{safe_ident(fl.name)}"
+                mtype = kind_to_mojo(jtype_to_kind(JType(fl.descriptor)))
+                mdef = kind_default(jtype_to_kind(JType(fl.descriptor)))
+                static_fields.append((sname, mtype, mdef))
+        for sname, mtype, _ in static_fields:
+            w(f"    var {sname}: {mtype}")
+
+    w("    def __init__(out self, nshards: Int32 = 0):")
     w("        self.arena = FrameArena()")
     w("        self.has_exc = False")
     w("        self.exc_cid = 0")
     w("        self.exc_obj = JRef()")
     w("        self.ret_ref = JRef()")
+    w("        self.shard_count = nshards")
+    w("        if nshards > 0:")
+    w('            self.shard_statics = external_call["calloc", OptionalPointer[OptionalPointer[NoneType, MutUntrackedOrigin], MutUntrackedOrigin]](Int(nshards), 8)')
+    w("        else:")
+    w("            self.shard_statics = {}")
     for sname, _, mdef in static_fields:
         w(f"        self.{sname} = {mdef}")
+    w("    def __deinit__(deinit self):")
+    w("        if self.shard_statics:")
+    w("            var arr = self.shard_statics.unsafe_value()")
+    w("            for i in range(Int(self.shard_count)):")
+    w("                if arr.unsafe_offset(i)[]:")
+    w('                    external_call["free", NoneType](arr.unsafe_offset(i)[].unsafe_value())')
+    w('            external_call["free", NoneType](arr.unsafe_bitcast[NoneType]())')
     w("")
+
+    if num_shards > 0:
+        return "\n".join(out), exported_syms
 
     for cname in sorted(hierarchy.classes):
         ci = hierarchy.classes[cname]
@@ -253,6 +363,184 @@ def emit_shared_module(hierarchy: Hierarchy, stats: CodegenStats | None = None) 
         w("    return JRef(raw.unsafe_bitcast[ObjHeader]())")
         w("")
     return "\n".join(out), exported_syms
+
+
+def emit_shard_classes_and_statics(
+    out: list[str],
+    hierarchy: Hierarchy,
+    shard_classes: list[str],
+    shard_idx: int,
+    stats: CodegenStats,
+    *,
+    cross_news: set[str],
+    cross_gf: set[tuple[str, str]],
+    cross_pf: set[tuple[str, str]],
+    cross_gs: set[tuple[str, str]],
+    cross_ps: set[tuple[str, str]],
+) -> None:
+    """Emit per-shard static globals, class structs, and only cross-referenced C-ABI trampolines."""
+    w = out.append
+    static_fields: list[tuple[str, str, str, str, str]] = []
+    for cname in sorted(shard_classes):
+        ci = hierarchy.classes[cname]
+        for fl in ci.static_fields:
+            sname = f"sf_{mangle_class(cname)[2:]}_{safe_ident(fl.name)}"
+            k = jtype_to_kind(JType(fl.descriptor))
+            static_fields.append((cname, fl.name, sname, kind_to_mojo(k), kind_default(k)))
+
+    if static_fields:
+        w("struct _ShardStatics:")
+        for _, _, sname, mtype, _ in static_fields:
+            w(f"    var {sname}: {mtype}")
+        w("    def __init__(out self):")
+        for _, _, sname, _, mdef in static_fields:
+            w(f"        self.{sname} = {mdef}")
+        w("")
+        w("@always_inline")
+        w("def _sf(_s: JStaticsPtr) raises JThrowable -> Pointer[_ShardStatics, MutUntrackedOrigin]:")
+        w(f"    var slot = _s[].shard_statics.unsafe_value().unsafe_offset({shard_idx})")
+        w("    if not slot[]:")
+        w("        var sp = alloc_raw[_ShardStatics]()")
+        w("        sp.unsafe_write(_ShardStatics())")
+        w("        slot[] = sp.unsafe_bitcast[NoneType]()")
+        w("    return slot[].unsafe_value().unsafe_bitcast[_ShardStatics]()")
+        w("")
+
+        for cname, fname, sname, mtype, _ in static_fields:
+            k_is_ref = (mtype == "JRef")
+            if (cname, fname) in cross_gs:
+                sym = f"x_gs_{mangle_class(cname)[2:]}_{safe_ident(fname)}"
+                cret = "NoneType" if k_is_ref else mtype
+                w(f'@export("{sym}")')
+                w(f'def _{sym}(_s: JStaticsPtr) abi("C") -> {cret}:')
+                w("    try:")
+                if k_is_ref:
+                    w(f"        _s[].ret_ref = _sf(_s)[].{sname}.copy()")
+                    w("        return")
+                else:
+                    w(f"        return _sf(_s)[].{sname}")
+                w("    except _exc:")
+                w("        _s[].has_exc = True")
+                w("        _s[].exc_cid = _exc.class_id")
+                w("        _s[].exc_obj = _exc.obj.copy()")
+                w("        return" if k_is_ref else f"        return {kind_default(jtype_to_kind(JType('I' if mtype == 'Int32' else 'J' if mtype == 'Int64' else 'F' if mtype == 'Float32' else 'D')))}")
+                w("")
+            if (cname, fname) in cross_ps:
+                sym = f"x_ps_{mangle_class(cname)[2:]}_{safe_ident(fname)}"
+                parg = "raw_v: OptionalPointer[ObjHeader, MutUntrackedOrigin]" if k_is_ref else f"v: {mtype}"
+                w(f'@export("{sym}")')
+                w(f'def _{sym}(_s: JStaticsPtr, {parg}) abi("C") -> NoneType:')
+                w("    try:")
+                if k_is_ref:
+                    w(f"        _sf(_s)[].{sname} = jref_from_raw(raw_v)")
+                else:
+                    w(f"        _sf(_s)[].{sname} = v")
+                w("        return")
+                w("    except _exc:")
+                w("        _s[].has_exc = True")
+                w("        _s[].exc_cid = _exc.class_id")
+                w("        _s[].exc_obj = _exc.obj.copy()")
+                w("        return")
+                w("")
+
+    for cname in sorted(shard_classes):
+        ci = hierarchy.classes[cname]
+        if ci.cf.is_interface:
+            continue
+        stats.classes_emitted += 1
+        sname = mangle_class(cname) + "Data"
+        mc = mangle_class(cname)
+        drop_fn = f"drop_{mc}"
+        new_fn = f"new_{mc}"
+        new_a_fn = f"new_arena_{mc}"
+        w(f"struct {sname}:")
+        w("    var hdr: ObjHeader")
+        for fl in ci.all_fields:
+            mtype = kind_to_mojo(jtype_to_kind(JType(fl.descriptor)))
+            w(f"    var f_{safe_ident(fl.mojo_name)}: {mtype}")
+        w("")
+        w(f"def {drop_fn}(p: Pointer[ObjHeader, MutUntrackedOrigin]):")
+        w(f"    var op = p.unsafe_bitcast[{sname}]()")
+        w("    op.unsafe_deinit_pointee()")
+        w("    free_raw(op)")
+        w("")
+        w(f"def {new_fn}() raises JThrowable -> JRef:")
+        w(f"    var raw = alloc_raw[{sname}]()")
+        w(f"    raw[].hdr = ObjHeader({ci.class_id}, {{}}, {drop_fn})")
+        for fl in ci.all_fields:
+            mdef = kind_default(jtype_to_kind(JType(fl.descriptor)))
+            w(f"    raw[].f_{safe_ident(fl.mojo_name)} = {mdef}")
+        w("    return JRef(raw.unsafe_bitcast[ObjHeader]())")
+        w("")
+        w("@always_inline")
+        w(f"def {new_a_fn}(_s: JStaticsPtr) -> JRef:")
+        w(f"    var raw = alloc_arena_obj[{sname}](_s[].arena)")
+        w(f"    raw[].hdr = ObjHeader({ci.class_id}, FLAG_ARENA)")
+        for fl in ci.all_fields:
+            mdef = kind_default(jtype_to_kind(JType(fl.descriptor)))
+            w(f"    raw[].f_{safe_ident(fl.mojo_name)} = {mdef}")
+        w("    return JRef(raw.unsafe_bitcast[ObjHeader]())")
+        w("")
+
+        if cname in cross_news:
+            w(f'@export("x_{new_fn}")')
+            w(f'def _x_{new_fn}(_s: JStaticsPtr) abi("C") -> NoneType:')
+            w("    try:")
+            w(f"        _s[].ret_ref = {new_fn}()")
+            w("        return")
+            w("    except _exc:")
+            w("        _s[].has_exc = True")
+            w("        _s[].exc_cid = _exc.class_id")
+            w("        _s[].exc_obj = _exc.obj.copy()")
+            w("        return")
+            w("")
+            w(f'@export("x_{new_a_fn}")')
+            w(f'def _x_{new_a_fn}(_s: JStaticsPtr) abi("C") -> NoneType:')
+            w(f"    _s[].ret_ref = {new_a_fn}(_s)")
+            w("    return")
+            w("")
+
+        for fl in ci.all_fields:
+            fk = jtype_to_kind(JType(fl.descriptor))
+            mtype = kind_to_mojo(fk)
+            fn_id = f"{mc[2:]}_{safe_ident(fl.name)}"
+            mfield = safe_ident(fl.mojo_name)
+            if (cname, fl.name) in cross_gf:
+                sym = f"x_gf_{fn_id}"
+                cret = "NoneType" if fk == KIND_R else mtype
+                w(f'@export("{sym}")')
+                w(f'def _{sym}(_s: JStaticsPtr, raw_o: OptionalPointer[ObjHeader, MutUntrackedOrigin]) abi("C") -> {cret}:')
+                w("    try:")
+                w(f"        var op = jref_from_raw(raw_o).non_null().unsafe_bitcast[{sname}]()")
+                if fk == KIND_R:
+                    w(f"        _s[].ret_ref = op[].f_{mfield}.copy()")
+                    w("        return")
+                else:
+                    w(f"        return op[].f_{mfield}")
+                w("    except _exc:")
+                w("        _s[].has_exc = True")
+                w("        _s[].exc_cid = _exc.class_id")
+                w("        _s[].exc_obj = _exc.obj.copy()")
+                w("        return" if fk == KIND_R else f"        return {kind_default(fk)}")
+                w("")
+            if (cname, fl.name) in cross_pf:
+                sym = f"x_pf_{fn_id}"
+                parg = "raw_v: OptionalPointer[ObjHeader, MutUntrackedOrigin]" if fk == KIND_R else f"v: {mtype}"
+                w(f'@export("{sym}")')
+                w(f'def _{sym}(_s: JStaticsPtr, raw_o: OptionalPointer[ObjHeader, MutUntrackedOrigin], {parg}) abi("C") -> NoneType:')
+                w("    try:")
+                w(f"        var op = jref_from_raw(raw_o).non_null().unsafe_bitcast[{sname}]()")
+                if fk == KIND_R:
+                    w(f"        op[].f_{mfield} = jref_from_raw(raw_v)")
+                else:
+                    w(f"        op[].f_{mfield} = v")
+                w("        return")
+                w("    except _exc:")
+                w("        _s[].has_exc = True")
+                w("        _s[].exc_cid = _exc.class_id")
+                w("        _s[].exc_obj = _exc.obj.copy()")
+                w("        return")
+                w("")
 
 
 def emit_mojo_program(
@@ -615,20 +903,35 @@ def _emit_block_stmts(
             cname = args[0]
             if cname == "java/lang/StringBuilder":
                 w(f"{ind}{dst.name} = new_sb()")
-            elif cname in hierarchy.classes:
-                if dst.name in opt.arena_allocs:
-                    w(f"{ind}{dst.name} = new_arena_{mangle_class(cname)}(_s)")
+            elif cname in hierarchy.classes and not hierarchy.classes[cname].cf.is_interface:
+                mc = mangle_class(cname)
+                is_cross = (
+                    stats.current_shard is not None
+                    and stats.class_to_shard is not None
+                    and stats.class_to_shard.get(cname) != stats.current_shard
+                )
+                if is_cross:
+                    xsym = f"x_new_arena_{mc}" if dst.name in opt.arena_allocs else f"x_new_{mc}"
+                    w(f'{ind}external_call["{xsym}", NoneType](_s)')
+                    w(f"{ind}if _s[].has_exc:")
+                    w(f"{ind}    _s[].has_exc = False")
+                    w(f'{ind}    raise JThrowable(_s[].exc_cid, "cross_new", _s[].exc_obj.copy())')
+                    w(f"{ind}{dst.name} = _s[].ret_ref.copy()")
+                    w(f"{ind}_s[].ret_ref = JRef()")
+                elif dst.name in opt.arena_allocs:
+                    w(f"{ind}{dst.name} = new_arena_{mc}(_s)")
                 else:
-                    w(f"{ind}{dst.name} = new_{mangle_class(cname)}()")
+                    w(f"{ind}{dst.name} = new_{mc}()")
             else:
                 w(f"{ind}{dst.name} = JRef()")
         elif op == "newarray":
             atype, cnt = args
             elem_t = {"Z": "Bool", "B": "Int8", "C": "UInt16", "S": "Int16", "I": "Int32", "J": "Int64", "F": "Float32", "D": "Float64"}.get(atype, "JRef")
+            cid_expr = {"Z": "CID_ARRAY_B1", "B": "CID_ARRAY_B1", "C": "CID_ARRAY_B2", "S": "CID_ARRAY_B2", "I": "CID_ARRAY_B4", "F": "CID_ARRAY_B4", "J": "CID_ARRAY_B8", "D": "CID_ARRAY_B8"}.get(atype, "CID_ARRAY_REF")
             if dst.name in opt.arena_allocs:
-                w(f"{ind}{dst.name} = new_array_arena[{elem_t}](_s[].arena, 8, {cnt.name})")
+                w(f"{ind}{dst.name} = new_array_arena[{elem_t}](_s[].arena, {cid_expr}, {cnt.name})")
             else:
-                w(f"{ind}{dst.name} = new_array[{elem_t}](8, {cnt.name})")
+                w(f"{ind}{dst.name} = new_array[{elem_t}]({cid_expr}, {cnt.name})")
         elif op == "multianewarray":
             cls_desc, dim_vals = args
             leaf_c = cls_desc.lstrip("[")[0] if cls_desc.lstrip("[") else "L"
@@ -653,33 +956,110 @@ def _emit_block_stmts(
             w(f"{ind}array_set[{elem_t}]({arr.name}, {idx.name}, {vexpr})")
         elif op == "getstatic":
             owner, fname, _ = args
+            decl_owner = _resolve_static_owner(hierarchy, owner, fname)
             if owner == "java/lang/System" and fname in ("out", "err"):
                 w(f"{ind}{dst.name} = JRef()")
-            elif owner in hierarchy.classes:
-                sname = f"sf_{mangle_class(owner)[2:]}_{safe_ident(fname)}"
-                w(f"{ind}{dst.name} = _s[].{sname}" + (".copy()" if dst.kind == KIND_R else ""))
+            elif decl_owner is not None:
+                is_cross = (
+                    stats.current_shard is not None
+                    and stats.class_to_shard is not None
+                    and stats.class_to_shard.get(decl_owner) != stats.current_shard
+                )
+                sname = f"sf_{mangle_class(decl_owner)[2:]}_{safe_ident(fname)}"
+                if is_cross:
+                    sym = f"x_gs_{mangle_class(decl_owner)[2:]}_{safe_ident(fname)}"
+                    if dst.kind == KIND_R:
+                        w(f'{ind}external_call["{sym}", NoneType](_s)')
+                        w(f"{ind}if _s[].has_exc:")
+                        w(f"{ind}    _s[].has_exc = False")
+                        w(f'{ind}    raise JThrowable(_s[].exc_cid, "cross_gs", _s[].exc_obj.copy())')
+                        w(f"{ind}{dst.name} = _s[].ret_ref.copy()")
+                        w(f"{ind}_s[].ret_ref = JRef()")
+                    else:
+                        mtype = kind_to_mojo(dst.kind)
+                        w(f'{ind}var _xgs_{dst.name} = external_call["{sym}", {mtype}](_s)')
+                        w(f"{ind}if _s[].has_exc:")
+                        w(f"{ind}    _s[].has_exc = False")
+                        w(f'{ind}    raise JThrowable(_s[].exc_cid, "cross_gs", _s[].exc_obj.copy())')
+                        w(f"{ind}{dst.name} = _xgs_{dst.name}")
+                else:
+                    base = "_sf(_s)[]" if stats.current_shard is not None else "_s[]"
+                    w(f"{ind}{dst.name} = {base}.{sname}" + (".copy()" if dst.kind == KIND_R else ""))
             else:
                 w(f"{ind}{dst.name} = {kind_default(dst.kind)}")
         elif op == "putstatic":
             owner, fname, _, val = args
-            if owner in hierarchy.classes:
-                sname = f"sf_{mangle_class(owner)[2:]}_{safe_ident(fname)}"
-                w(f"{ind}_s[].{sname} = {_copy_if_ref(val)}")
+            decl_owner = _resolve_static_owner(hierarchy, owner, fname)
+            if decl_owner is not None:
+                is_cross = (
+                    stats.current_shard is not None
+                    and stats.class_to_shard is not None
+                    and stats.class_to_shard.get(decl_owner) != stats.current_shard
+                )
+                sname = f"sf_{mangle_class(decl_owner)[2:]}_{safe_ident(fname)}"
+                if is_cross:
+                    sym = f"x_ps_{mangle_class(decl_owner)[2:]}_{safe_ident(fname)}"
+                    arg_v = f"{val.name}.ptr" if val.kind == KIND_R else val.name
+                    w(f'{ind}external_call["{sym}", NoneType](_s, {arg_v})')
+                    w(f"{ind}if _s[].has_exc:")
+                    w(f"{ind}    _s[].has_exc = False")
+                    w(f'{ind}    raise JThrowable(_s[].exc_cid, "cross_ps", _s[].exc_obj.copy())')
+                else:
+                    base = "_sf(_s)[]" if stats.current_shard is not None else "_s[]"
+                    w(f"{ind}{base}.{sname} = {_copy_if_ref(val)}")
         elif op == "getfield":
-            owner, fname, _, obj = args
-            if owner in hierarchy.classes:
-                struct_t = mangle_class(owner) + "Data"
-                fl = next((f for f in hierarchy.classes[owner].all_fields if f.name == fname), None)
+            owner, fname, fdesc, obj = args
+            if owner in hierarchy.classes and not hierarchy.classes[owner].cf.is_interface:
+                fl = hierarchy.classes[owner].field_by_name.get(fname)
                 mname = safe_ident(fl.mojo_name if fl else fname)
-                sfx = ".copy()" if dst.kind == KIND_R else ""
-                w(f"{ind}{dst.name} = {obj.name}.non_null().unsafe_bitcast[{struct_t}]()[].f_{mname}{sfx}")
+                fk = jtype_to_kind(JType(fl.descriptor if fl else fdesc))
+                is_cross = (
+                    stats.current_shard is not None
+                    and stats.class_to_shard is not None
+                    and stats.class_to_shard.get(owner) != stats.current_shard
+                )
+                if is_cross:
+                    sym = f"x_gf_{mangle_class(owner)[2:]}_{safe_ident(fname)}"
+                    if fk == KIND_R:
+                        w(f'{ind}external_call["{sym}", NoneType](_s, {obj.name}.ptr)')
+                        w(f"{ind}if _s[].has_exc:")
+                        w(f"{ind}    _s[].has_exc = False")
+                        w(f'{ind}    raise JThrowable(_s[].exc_cid, "cross_gf", _s[].exc_obj.copy())')
+                        w(f"{ind}{dst.name} = _s[].ret_ref.copy()")
+                        w(f"{ind}_s[].ret_ref = JRef()")
+                    else:
+                        mtype = kind_to_mojo(fk)
+                        w(f'{ind}var _xgf_{dst.name} = external_call["{sym}", {mtype}](_s, {obj.name}.ptr)')
+                        w(f"{ind}if _s[].has_exc:")
+                        w(f"{ind}    _s[].has_exc = False")
+                        w(f'{ind}    raise JThrowable(_s[].exc_cid, "cross_gf", _s[].exc_obj.copy())')
+                        w(f"{ind}{dst.name} = _xgf_{dst.name}")
+                else:
+                    struct_t = mangle_class(owner) + "Data"
+                    sfx = ".copy()" if dst.kind == KIND_R else ""
+                    w(f"{ind}{dst.name} = {obj.name}.non_null().unsafe_bitcast[{struct_t}]()[].f_{mname}{sfx}")
+            elif dst is not None and dst.name in opt.live_vars:
+                w(f"{ind}{dst.name} = {kind_default(dst.kind)}")
         elif op == "putfield":
             owner, fname, _, obj, val = args
-            if owner in hierarchy.classes:
-                struct_t = mangle_class(owner) + "Data"
-                fl = next((f for f in hierarchy.classes[owner].all_fields if f.name == fname), None)
+            if owner in hierarchy.classes and not hierarchy.classes[owner].cf.is_interface:
+                fl = hierarchy.classes[owner].field_by_name.get(fname)
                 mname = safe_ident(fl.mojo_name if fl else fname)
-                w(f"{ind}{obj.name}.non_null().unsafe_bitcast[{struct_t}]()[].f_{mname} = {_copy_if_ref(val)}")
+                is_cross = (
+                    stats.current_shard is not None
+                    and stats.class_to_shard is not None
+                    and stats.class_to_shard.get(owner) != stats.current_shard
+                )
+                if is_cross:
+                    sym = f"x_pf_{mangle_class(owner)[2:]}_{safe_ident(fname)}"
+                    arg_v = f"{val.name}.ptr" if val.kind == KIND_R else val.name
+                    w(f'{ind}external_call["{sym}", NoneType](_s, {obj.name}.ptr, {arg_v})')
+                    w(f"{ind}if _s[].has_exc:")
+                    w(f"{ind}    _s[].has_exc = False")
+                    w(f'{ind}    raise JThrowable(_s[].exc_cid, "cross_pf", _s[].exc_obj.copy())')
+                else:
+                    struct_t = mangle_class(owner) + "Data"
+                    w(f"{ind}{obj.name}.non_null().unsafe_bitcast[{struct_t}]()[].f_{mname} = {_copy_if_ref(val)}")
         elif op == "instanceof":
             _emit_instanceof(w, ind, hierarchy, dst, args[0], args[1])
         elif op == "checkcast":
@@ -978,8 +1358,38 @@ def _emit_call(w, ind: str, hierarchy: Hierarchy, dst: Val | None, args: tuple, 
     if builtin == "math_cos":
         assign(f"jmath_cos({cargs[0].name})")
         return
+    if builtin == "math_tan":
+        assign(f"jmath_tan({cargs[0].name})")
+        return
+    if builtin == "math_asin":
+        assign(f"jmath_asin({cargs[0].name})")
+        return
+    if builtin == "math_acos":
+        assign(f"jmath_acos({cargs[0].name})")
+        return
+    if builtin == "math_atan":
+        assign(f"jmath_atan({cargs[0].name})")
+        return
     if builtin == "math_sqrt":
         assign(f"jmath_sqrt({cargs[0].name})")
+        return
+    if builtin == "math_cbrt":
+        assign(f"jmath_cbrt({cargs[0].name})")
+        return
+    if builtin == "math_exp":
+        assign(f"jmath_exp({cargs[0].name})")
+        return
+    if builtin == "math_log":
+        assign(f"jmath_log({cargs[0].name})")
+        return
+    if builtin == "math_log10":
+        assign(f"jmath_log10({cargs[0].name})")
+        return
+    if builtin == "math_pow":
+        assign(f"jmath_pow({cargs[0].name}, {cargs[1].name})")
+        return
+    if builtin == "math_hypot":
+        assign(f"jmath_hypot({cargs[0].name}, {cargs[1].name})")
         return
     if builtin == "math_floor":
         assign(f"jmath_floor({cargs[0].name})")
@@ -987,8 +1397,44 @@ def _emit_call(w, ind: str, hierarchy: Hierarchy, dst: Val | None, args: tuple, 
     if builtin == "math_ceil":
         assign(f"jmath_ceil({cargs[0].name})")
         return
+    if builtin == "math_round_d":
+        assign(f"jmath_round_d({cargs[0].name})")
+        return
+    if builtin == "math_round_f":
+        assign(f"jmath_round_f({cargs[0].name})")
+        return
+    if builtin == "math_signum_d":
+        assign(f"jmath_signum_d({cargs[0].name})")
+        return
+    if builtin == "math_signum_f":
+        assign(f"jmath_signum_f({cargs[0].name})")
+        return
     if builtin == "math_atan2":
         assign(f"jmath_atan2({cargs[0].name}, {cargs[1].name})")
+        return
+    if builtin == "float_to_bits":
+        assign(f"jfloat_to_bits({cargs[0].name})")
+        return
+    if builtin == "bits_to_float":
+        assign(f"jbits_to_float({cargs[0].name})")
+        return
+    if builtin == "double_to_bits":
+        assign(f"jdouble_to_bits({cargs[0].name})")
+        return
+    if builtin == "bits_to_double":
+        assign(f"jbits_to_double({cargs[0].name})")
+        return
+    if builtin == "float_isnan":
+        assign(f"jfloat_isnan({cargs[0].name})")
+        return
+    if builtin == "float_isinf":
+        assign(f"jfloat_isinf({cargs[0].name})")
+        return
+    if builtin == "double_isnan":
+        assign(f"jdouble_isnan({cargs[0].name})")
+        return
+    if builtin == "double_isinf":
+        assign(f"jdouble_isinf({cargs[0].name})")
         return
     if builtin == "objects_eq":
         assign(f"Int32(1) if {cargs[0].name}.same({cargs[1].name}) else (Int32(0) if ({cargs[0].name}.is_null() or {cargs[1].name}.is_null()) else string_equals({cargs[0].name}, {cargs[1].name}))")
@@ -1003,10 +1449,37 @@ def _emit_call(w, ind: str, hierarchy: Hierarchy, dst: Val | None, args: tuple, 
         assign("jsys_current_millis()")
         return
     if builtin == "sys_arraycopy":
-        w(f"{ind}arraycopy[Int32]({cargs[0].name}, {cargs[1].name}, {cargs[2].name}, {cargs[3].name}, {cargs[4].name})")
+        w(f"{ind}arraycopy_any({cargs[0].name}, {cargs[1].name}, {cargs[2].name}, {cargs[3].name}, {cargs[4].name})")
+        return
+    if builtin == "rt_cpus":
+        assign("jruntime_cpus()")
+        return
+    if builtin == "thread_sleep":
+        w(f"{ind}jthread_sleep({cargs[0].name})")
         return
     if builtin == "arrays_fill_i":
         w(f"{ind}jarrays_fill_i({cargs[0].name}, {cargs[1].name})")
+        return
+    if builtin == "unsafe_alloc":
+        assign(f"junsafe_alloc({cargs[0].name})")
+        return
+    if builtin == "unsafe_realloc":
+        assign(f"junsafe_realloc({cargs[0].name}, {cargs[1].name})")
+        return
+    if builtin == "unsafe_free":
+        w(f"{ind}junsafe_free({cargs[0].name})")
+        return
+    if builtin == "unsafe_memset":
+        w(f"{ind}junsafe_memset({cargs[0].name}, {cargs[1].name}, {cargs[2].name})")
+        return
+    if builtin == "unsafe_memcpy":
+        w(f"{ind}junsafe_memcpy({cargs[0].name}, {cargs[1].name}, {cargs[2].name})")
+        return
+    if builtin in ("unsafe_get_i8", "unsafe_get_i16", "unsafe_get_i32", "unsafe_get_i64", "unsafe_get_f32", "unsafe_get_f64"):
+        assign(f"j{builtin}({cargs[0].name})")
+        return
+    if builtin in ("unsafe_put_i8", "unsafe_put_i16", "unsafe_put_i32", "unsafe_put_i64", "unsafe_put_f32", "unsafe_put_f64"):
+        w(f"{ind}j{builtin}({cargs[0].name}, {cargs[1].name})")
         return
 
     target_owner = owner

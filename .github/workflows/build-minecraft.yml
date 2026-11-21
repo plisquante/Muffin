@@ -10,11 +10,19 @@ on:
       shards:
         description: "Mojo Paralel Shard Sayısı"
         required: true
-        default: "32"
+        default: "64"
       jobs:
         description: "Paralel Derleyici İş Parçacığı (CPU)"
         required: true
         default: "4"
+      opt_level:
+        description: "Mojo Optimizasyon Seviyesi (0=Hızlı Derleme, 3=Maksimum Performans)"
+        type: choice
+        options:
+          - "0"
+          - "3"
+        required: true
+        default: "0"
       build_target:
         description: "Derleme Hedefi"
         type: choice
@@ -71,7 +79,7 @@ jobs:
             ~/.cache/muffin
             work/versions
             work/libraries
-          key: ${{ runner.os }}-mc-${{ inputs.mc_version }}-v1
+          key: ${{ runner.os }}-mc-${{ inputs.mc_version }}-v2
           restore-keys: |
             ${{ runner.os }}-mc-
 
@@ -99,21 +107,22 @@ jobs:
           python3 tools/fetch_client.py --version "${{ inputs.mc_version }}" --with-libraries
           ls -lh "work/versions/${{ inputs.mc_version }}/client.jar"
 
-      - name: Analyze, CFG Reducibility & Closed-World RTA Closure
+      - name: Analyze, CFG Reducibility & Closed-World RTA Closure (All JDK JMODs)
         run: |
           mkdir -p work/reports
           python3 -m tools.muffin analyze | tee work/reports/analyze.txt
           python3 -m tools.muffin cfg | tee work/reports/cfg.txt
           python3 -m tools.muffin rta | tee work/reports/rta.txt
 
-      - name: Translate 100% client.jar to Sharded Mojo 1.2 (${{ inputs.shards }} shards)
+      - name: Translate Full Closed-World RTA (client.jar + Libs + JDK) to Decoupled Mojo Shards
         run: |
           START=$SECONDS
-          python3 -m tools.muffin translate -o work/out/mc_shards --shards "${{ inputs.shards }}" | tee work/reports/translate.txt
+          python3 -m tools.muffin translate --rta -o work/out/mc_shards --shards "${{ inputs.shards }}" | tee work/reports/translate.txt
           echo "TRANSLATE_SEC=$((SECONDS - START))" >> "$GITHUB_ENV"
+          ls -lh work/out/mc_shards/shared.mojo
           ls -lh work/out/mc_shards | head -n 40
 
-      - name: Compile Android ARM64 Core Minecraft Shards (.so)
+      - name: Compile Android ARM64 Core Minecraft Shards (.so, -O3)
         if: inputs.build_target == 'android-arm64-core-shards' || inputs.build_target == 'rta-translate-and-apk'
         run: |
           python3 -m tools.muffin build-lib \
@@ -124,6 +133,7 @@ jobs:
             --filter net/minecraft/world/phys/AABB \
             --shards 4 \
             --jobs "${{ inputs.jobs }}" \
+            --opt 3 \
             --target-triple aarch64-unknown-linux-android26 \
             --name libmuffin_mc_core.so \
             -o work/out/android_core_so
@@ -131,12 +141,14 @@ jobs:
           "$NDK_BIN/llvm-readelf" -h work/out/android_core_so/libmuffin_mc_core.so | grep -E "ELF64|AArch64"
           "$NDK_BIN/llvm-nm" -D work/out/android_core_so/libmuffin_mc_core.so | grep -E "mc_android_entry|j2z_android_entry"
 
-      - name: Full Experimental All-Shard ARM64 Build (High-RAM Runner)
+      - name: Full Experimental RTA All-Shard ARM64 Build
         if: inputs.build_target == 'full-client-shards-experimental'
         run: |
           python3 -m tools.muffin build-lib \
+            --rta \
             --shards "${{ inputs.shards }}" \
             --jobs "${{ inputs.jobs }}" \
+            --opt "${{ inputs.opt_level }}" \
             --target-triple aarch64-unknown-linux-android26 \
             --name libminecraft_muffin.so \
             -o work/out/full_android_so
@@ -165,7 +177,7 @@ jobs:
           {
             echo "## Muffin Minecraft ${{ inputs.mc_version }} Build (${{ inputs.build_target }})"
             echo "- Runner: \`${{ inputs.runner_label }}\` (\`$(nproc)\` vCPU, \`$(free -h | awk '/Mem:/ {print $2}')\` RAM)"
-            echo "- Shards: \`${{ inputs.shards }}\` | Jobs: \`${{ inputs.jobs }}\` | Translate: \`${TRANSLATE_SEC:-?}s\`"
+            echo "- Shards: \`${{ inputs.shards }}\` | Jobs: \`${{ inputs.jobs }}\` | Opt: \`-O${{ inputs.opt_level }}\` | Translate: \`${TRANSLATE_SEC:-?}s\`"
             echo '```text'
             cat work/reports/*.txt 2>/dev/null || true
             echo '```'

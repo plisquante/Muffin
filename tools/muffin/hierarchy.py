@@ -36,6 +36,7 @@ class ClassInfo:
     max_sub_id: int = -1
     super_id: int = -1
     all_fields: list[FieldLayout] = field(default_factory=list)
+    field_by_name: dict[str, FieldLayout] = field(default_factory=dict)
     static_fields: list[FieldLayout] = field(default_factory=list)
     all_interfaces: set[str] = field(default_factory=set)
     vtable: list[tuple[str, str, str, str]] = field(default_factory=list)
@@ -152,6 +153,7 @@ class Hierarchy:
                     vtable.append((m.name, m.descriptor, name, m.descriptor))
 
             ci.all_fields = inst_fields
+            ci.field_by_name = {fl.name: fl for fl in inst_fields}
             ci.vtable = vtable
             ci.vtable_index = vmap
             ci.all_interfaces = all_ifaces

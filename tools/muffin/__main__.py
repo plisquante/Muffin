@@ -81,6 +81,38 @@ def cmd_cfg(args: argparse.Namespace) -> int:
     return 0
 
 
+def _discover_jdk_jmods() -> list[str]:
+    import os
+
+    cand_dirs: list[Path] = []
+    if os.environ.get("JAVA_HOME"):
+        cand_dirs.append(Path(os.environ["JAVA_HOME"]) / "jmods")
+    cand_dirs.extend(sorted(Path("/usr/lib/jvm").glob("*/jmods"), reverse=True))
+    cand_dirs.append(Path("/usr/lib/jvm/java-21-openjdk-amd64/jmods"))
+    for d in cand_dirs:
+        if d.is_dir():
+            jmods = sorted(str(p) for p in d.glob("*.jmod"))
+            if jmods:
+                return jmods
+    return []
+
+
+def _build_rta_hierarchy(src: Path, entry: str):
+    from .classpath import ClassPath
+    from .hierarchy import Hierarchy
+    from .rta import run_rta
+
+    libs = sorted(str(p) for p in (WORK / "libraries").rglob("*.jar"))
+    entries: list[str] = [str(src), *libs]
+    jmods = _discover_jdk_jmods()
+    boot_start = len(entries)
+    entries.extend(jmods)
+    cp = ClassPath(entries, boot_start=boot_start)
+    res = run_rta(cp, entry)
+    h = Hierarchy.build(list(res.loaded.values()), instantiated=res.instantiated)
+    return h, res
+
+
 def cmd_translate(args: argparse.Namespace) -> int:
     """Translate a jar (or directory of .class files) to Mojo 1.2."""
     from .classfile import parse_class
@@ -90,6 +122,27 @@ def cmd_translate(args: argparse.Namespace) -> int:
     from .shard import emit_sharded_project
 
     src = Path(args.input) if args.input else _default_jar()
+    entry = args.entry.replace(".", "/") if args.entry else None
+    out_path = Path(args.out)
+
+    if getattr(args, "rta", False):
+        rta_entry = entry or "net/minecraft/client/main/Main"
+        h, rta_res = _build_rta_hierarchy(src, rta_entry)
+        stats, files = emit_sharded_project(
+            h,
+            out_path,
+            shards=max(2, args.shards or 32),
+            entry_class=rta_entry,
+            reachable_methods=rta_res.reachable_methods,
+        )
+        print(
+            f"[muffin] RTA translated {len(files)} files in {out_path}: {stats.classes_emitted} classes, "
+            f"{stats.methods_emitted} reachable methods ({stats.structured_methods} structured, "
+            f"{stats.dispatch_methods} dispatch), {stats.arena_allocs_lowered} EA arena allocs, "
+            f"{len(rta_res.missing_classes)} missing classes, {len(rta_res.native_methods)} natives"
+        )
+        return 0
+
     cfs = []
     if src.is_dir():
         for p in sorted(src.rglob("*.class")):
@@ -110,8 +163,6 @@ def cmd_translate(args: argparse.Namespace) -> int:
     cfs.extend(des.synthetic_classes)
 
     h = Hierarchy.build(cfs)
-    entry = args.entry.replace(".", "/") if args.entry else None
-    out_path = Path(args.out)
 
     if args.shards and args.shards > 1:
         stats, files = emit_sharded_project(h, out_path, shards=args.shards, entry_class=entry)
@@ -137,27 +188,19 @@ def cmd_translate(args: argparse.Namespace) -> int:
 
 def cmd_rta(args: argparse.Namespace) -> int:
     """Run closed-world Rapid Type Analysis across client.jar + libraries + JDK."""
-    import os
-
     from .classpath import ClassPath
     from .rta import run_rta
 
     jar = Path(args.jar) if args.jar else _default_jar()
     libs = sorted(str(p) for p in (WORK / "libraries").rglob("*.jar"))
     entries: list[str] = [str(jar), *libs]
-    jmod_cands = []
-    if os.environ.get("JAVA_HOME"):
-        jmod_cands.append(Path(os.environ["JAVA_HOME"]) / "jmods" / "java.base.jmod")
-    jmod_cands.extend(sorted(Path("/usr/lib/jvm").glob("*/jmods/java.base.jmod"), reverse=True))
-    jmod_cands.append(Path("/usr/lib/jvm/java-21-openjdk-amd64/jmods/java.base.jmod"))
-    jmod = next((p for p in jmod_cands if p.is_file()), None)
+    jmods = _discover_jdk_jmods()
     boot_start = len(entries)
-    if jmod is not None:
-        entries.append(str(jmod))
+    entries.extend(jmods)
     cp = ClassPath(entries, boot_start=boot_start)
     res = run_rta(cp, args.entry)
     print(
-        f"[muffin] RTA from {args.entry}: loaded={len(res.loaded):,}, "
+        f"[muffin] RTA from {args.entry} ({len(jmods)} jmods): loaded={len(res.loaded):,}, "
         f"instantiated={len(res.instantiated):,}, methods={len(res.reachable_methods):,}, "
         f"natives={len(res.native_methods):,}, missing={len(res.missing_classes):,}, "
         f"unsupported_indy={len(res.unsupported_indy)}"
@@ -184,30 +227,44 @@ def cmd_build_lib(args: argparse.Namespace) -> int:
     from .shard import compile_sharded_shared_lib, emit_sharded_project
 
     src = Path(args.input) if args.input else _default_jar()
-    cfs = []
-    if src.is_dir():
-        for p in sorted(src.rglob("*.class")):
-            cfs.append(parse_class(p.read_bytes()))
-    else:
-        prefixes = tuple(p.replace(".", "/") for p in (args.filter or []))
-        with zipfile.ZipFile(src) as z:
-            for n in z.namelist():
-                if not n.endswith(".class") or n.startswith("META-INF/"):
-                    continue
-                if prefixes and not n.startswith(prefixes):
-                    continue
-                cfs.append(parse_class(z.read(n)))
-
-    des = IndyDesugarer()
-    for cf in cfs:
-        des.rewrite_class(cf)
-    cfs.extend(des.synthetic_classes)
-
-    h = Hierarchy.build(cfs)
     entry = args.entry.replace(".", "/") if args.entry else None
     out_dir = Path(args.out)
     shard_dir = out_dir / "shards"
-    stats, _ = emit_sharded_project(h, shard_dir, shards=args.shards, entry_class=entry, shared_lib=True)
+
+    if getattr(args, "rta", False):
+        rta_entry = entry or "net/minecraft/client/main/Main"
+        h, rta_res = _build_rta_hierarchy(src, rta_entry)
+        stats, _ = emit_sharded_project(
+            h,
+            shard_dir,
+            shards=args.shards,
+            entry_class=rta_entry,
+            shared_lib=True,
+            reachable_methods=rta_res.reachable_methods,
+        )
+    else:
+        cfs = []
+        if src.is_dir():
+            for p in sorted(src.rglob("*.class")):
+                cfs.append(parse_class(p.read_bytes()))
+        else:
+            prefixes = tuple(p.replace(".", "/") for p in (args.filter or []))
+            with zipfile.ZipFile(src) as z:
+                for n in z.namelist():
+                    if not n.endswith(".class") or n.startswith("META-INF/"):
+                        continue
+                    if prefixes and not n.startswith(prefixes):
+                        continue
+                    cfs.append(parse_class(z.read(n)))
+
+        des = IndyDesugarer()
+        for cf in cfs:
+            des.rewrite_class(cf)
+        cfs.extend(des.synthetic_classes)
+
+        h = Hierarchy.build(cfs)
+        stats, _ = emit_sharded_project(h, shard_dir, shards=args.shards, entry_class=entry, shared_lib=True)
+
     print(
         f"[muffin] emitted {args.shards} shards in {shard_dir}: {stats.classes_emitted} classes, "
         f"{stats.methods_emitted} methods"
@@ -224,6 +281,7 @@ def cmd_build_lib(args: argparse.Namespace) -> int:
         so_out,
         target_triple=args.target_triple,
         jobs=args.jobs,
+        opt_level=args.opt,
     )
     print(f"[muffin] built Android shared library -> {so_out} ({so_out.stat().st_size / 1024:.1f} KiB)")
     return 0
@@ -253,6 +311,7 @@ def main(argv: list[str] | None = None) -> int:
     t.add_argument("--entry", help="optional Java main class (e.g. demo.Main)")
     t.add_argument("--filter", action="append", help="only include classes matching prefix")
     t.add_argument("--shards", type=int, default=1, help="split output into N separately-compiled .mojo shards")
+    t.add_argument("--rta", action="store_true", help="use full closed-world RTA closure across libraries + JDK jmods")
     t.set_defaults(fn=cmd_translate)
     k = sub.add_parser("apk", help="build dual-ABI Mojo Edition Android Launcher APK")
     k.add_argument("--out", help="output .apk path (default: releases/Muffin-Minecraft-Mojo-Edition.apk)")
@@ -264,8 +323,10 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--filter", action="append", help="only include classes matching prefix")
     b.add_argument("--shards", type=int, default=8, help="number of parallel Mojo shards")
     b.add_argument("--jobs", "-j", type=int, default=None, help="parallel Mojo compile workers")
+    b.add_argument("--opt", type=int, default=3, choices=[0, 1, 2, 3], help="Mojo optimization level (0=fast build, 3=max perf)")
     b.add_argument("--target-triple", default="aarch64-unknown-linux-android26", help="Mojo LLVM target triple")
     b.add_argument("--name", default="libminecraft_muffin.so", help="output shared library filename")
+    b.add_argument("--rta", action="store_true", help="use full closed-world RTA closure across libraries + JDK jmods")
     b.set_defaults(fn=cmd_build_lib)
     args = ap.parse_args(argv)
     return args.fn(args)

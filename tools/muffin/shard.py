@@ -22,11 +22,14 @@ from pathlib import Path
 
 from .classfile import Member
 from .codegen_mojo import (
+    BUILTIN_CALLS,
     CodegenStats,
     _emit_method,
     _emit_runtime_imports,
+    _resolve_static_owner,
     emit_cross_trampoline,
     emit_mojo_program,
+    emit_shard_classes_and_statics,
     emit_shared_module,
 )
 from .hierarchy import ClassInfo, Hierarchy
@@ -43,8 +46,9 @@ def emit_sharded_project(
     shards: int = 8,
     entry_class: str | None = None,
     shared_lib: bool = False,
+    reachable_methods: set[tuple[str, str, str]] | None = None,
 ) -> tuple[CodegenStats, list[Path]]:
-    """Emit `shared.mojo`, `shard_XX.mojo`, and `main.mojo` into `out_dir`."""
+    """Emit minimal `shared.mojo`, decoupled `shard_XX.mojo` files, and `main.mojo`."""
     out_dir.mkdir(parents=True, exist_ok=True)
     if (shards <= 1 or len(hierarchy.classes) <= 1) and not shared_lib:
         code, stats = emit_mojo_program(hierarchy, entry_class=entry_class)
@@ -78,8 +82,8 @@ def emit_sharded_project(
 
     stats = CodegenStats(current_shard=None, class_to_shard=class_to_shard)
 
-    # 2. Emit shared.mojo
-    shared_src, exported_syms = emit_shared_module(hierarchy, stats)
+    # 2. Emit minimal shared.mojo (only JStatics, zero class structs / static fields)
+    shared_src, exported_syms = emit_shared_module(hierarchy, stats, num_shards=actual_shards)
     (out_dir / "shared.mojo").write_text(shared_src)
     shared_import = f"from shared import {', '.join(exported_syms)}"
 
@@ -92,13 +96,83 @@ def emit_sharded_project(
             for m in ci.cf.methods:
                 if m.code is None:
                     continue
+                if reachable_methods is not None and (cname, m.name, m.descriptor) not in reachable_methods:
+                    continue
                 ir = lift_method(ci.cf, m)
                 lifted_by_shard[s_idx].append((ci, m, ir))
                 all_irs.append(ir)
 
     non_escaping_params = compute_non_escaping_params(all_irs)
 
-    # 4. Emit each shard_XX.mojo
+    # 4. Scan cross-shard accesses so shards only export needed C-ABI trampolines
+    cross_news: set[str] = set()
+    cross_gf: set[tuple[str, str]] = set()
+    cross_pf: set[tuple[str, str]] = set()
+    cross_gs: set[tuple[str, str]] = set()
+    cross_ps: set[tuple[str, str]] = set()
+    cross_calls: set[tuple[str, str, str]] = set()
+
+    for cname, cci in hierarchy.classes.items():
+        for mm in cci.cf.methods:
+            if mm.name == "<clinit>" and mm.code is not None:
+                if reachable_methods is None or (cname, "<clinit>", "()V") in reachable_methods:
+                    cross_calls.add((cname, "<clinit>", "()V"))
+    if entry_class and entry_class in hierarchy.classes:
+        cross_calls.add((entry_class, "main", "([Ljava/lang/String;)V"))
+
+    for s_idx in range(actual_shards):
+        for _, _, ir in lifted_by_shard[s_idx]:
+            for blk in ir.blocks.values():
+                for st in blk.stmts:
+                    op, a = st.op, st.args
+                    if op == "new":
+                        cn = a[0]
+                        if cn in class_to_shard and class_to_shard[cn] != s_idx:
+                            cross_news.add(cn)
+                    elif op == "getfield":
+                        own, fn, _ = a[0], a[1], a[2]
+                        if own in class_to_shard and class_to_shard[own] != s_idx:
+                            cross_gf.add((own, fn))
+                    elif op == "putfield":
+                        own, fn, _ = a[0], a[1], a[2]
+                        if own in class_to_shard and class_to_shard[own] != s_idx:
+                            cross_pf.add((own, fn))
+                    elif op == "getstatic":
+                        decl = _resolve_static_owner(hierarchy, a[0], a[1])
+                        if decl is not None and class_to_shard.get(decl) != s_idx:
+                            cross_gs.add((decl, a[1]))
+                    elif op == "putstatic":
+                        decl = _resolve_static_owner(hierarchy, a[0], a[1])
+                        if decl is not None and class_to_shard.get(decl) != s_idx:
+                            cross_ps.add((decl, a[1]))
+                    elif op == "call":
+                        cop, owner, mn, md, _, _ = a
+                        if (owner, mn, md) in BUILTIN_CALLS:
+                            continue
+                        targets: list[str] = []
+                        if cop in ("invokevirtual", "invokeinterface"):
+                            devirt = hierarchy.resolve_devirtualized(owner, mn, md)
+                            if devirt is not None:
+                                r_own = hierarchy.resolve_method(devirt, mn, md)
+                                if r_own:
+                                    targets.append(r_own)
+                            else:
+                                subs = hierarchy.concrete_targets(owner, mn, md)
+                                if subs:
+                                    targets.extend(impl for _, impl in subs)
+                                else:
+                                    r_own = hierarchy.resolve_method(owner, mn, md)
+                                    if r_own:
+                                        targets.append(r_own)
+                        else:
+                            r_own = hierarchy.resolve_method(owner, mn, md)
+                            if r_own:
+                                targets.append(r_own)
+                        for tgt in targets:
+                            if class_to_shard.get(tgt) != s_idx:
+                                cross_calls.add((tgt, mn, md))
+
+    # 5. Emit each decoupled shard_XX.mojo
     shard_paths: list[Path] = []
     for s_idx in range(actual_shards):
         stats.current_shard = s_idx
@@ -109,6 +183,18 @@ def emit_sharded_project(
         _emit_runtime_imports(w)
         w(shared_import)
         w("")
+        emit_shard_classes_and_statics(
+            out,
+            hierarchy,
+            buckets[s_idx],
+            s_idx,
+            stats,
+            cross_news=cross_news,
+            cross_gf=cross_gf,
+            cross_pf=cross_pf,
+            cross_gs=cross_gs,
+            cross_ps=cross_ps,
+        )
         for ci, m, ir in lifted_by_shard[s_idx]:
             opt = optimize_method(ir, non_escaping_params=non_escaping_params)
             ast = structure_method(ir)
@@ -120,12 +206,13 @@ def emit_sharded_project(
             stats.arena_allocs_lowered += len(opt.arena_allocs)
             _emit_method(out, hierarchy, ci, m, ir, opt, ast, stats)
             w("")
-            emit_cross_trampoline(out, ir)
+            if (ir.owner, ir.name, ir.descriptor) in cross_calls:
+                emit_cross_trampoline(out, ir)
         sp = out_dir / f"shard_{s_idx:02d}.mojo"
         sp.write_text("\n".join(out))
         shard_paths.append(sp)
 
-    # 5. Emit main.mojo (invokes <clinit>s and entry main via C-ABI trampolines)
+    # 6. Emit main.mojo (invokes <clinit>s and entry main via C-ABI trampolines)
     m_out: list[str] = []
     mw = m_out.append
     mw('"""Muffin Sharded Entrypoint (Mojo 1.2)."""')
@@ -134,8 +221,8 @@ def emit_sharded_project(
     mw(shared_import)
     mw("")
     mw("def _run_muffin_entry() raises:")
-    mw("    var statics = alloc_raw[JStatics]()")
-    mw("    statics.unsafe_write(JStatics())")
+    mw(f"    var statics = alloc_raw[JStatics]()")
+    mw(f"    statics.unsafe_write(JStatics({actual_shards}))")
     for cname in sorted(hierarchy.classes):
         cci = hierarchy.classes[cname]
         if any(mm.name == "<clinit>" and mm.code is not None for mm in cci.cf.methods):
@@ -180,9 +267,16 @@ def emit_sharded_project(
     return stats, shard_paths
 
 
-def _compile_obj(mojo_bin: str, repo_root: Path, out_dir: Path, src: Path, target_triple: str | None = None) -> Path:
+def _compile_obj(
+    mojo_bin: str,
+    repo_root: Path,
+    out_dir: Path,
+    src: Path,
+    target_triple: str | None = None,
+    opt_level: int = 3,
+) -> Path:
     obj = src.with_suffix(".o")
-    cmd = [mojo_bin, "build", "--emit", "object"]
+    cmd = [mojo_bin, "build", "--emit", "object", "-O", str(opt_level)]
     if target_triple:
         cmd.extend(["--target-triple", target_triple])
     cmd.extend(["-I", str(repo_root), "-I", str(out_dir), str(src), "-o", str(obj)])
@@ -198,14 +292,17 @@ def compile_sharded(
     *,
     jobs: int | None = None,
     target_triple: str | None = None,
+    opt_level: int = 3,
 ) -> None:
     """Compile each `shard_XX.mojo` to `.o` in parallel and link with `main.mojo`."""
     shard_files = sorted(out_dir.glob("shard_*.mojo"))
     workers = max(1, jobs or min(len(shard_files), os.cpu_count() or 2))
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        obj_files = list(ex.map(lambda sf: _compile_obj(mojo_bin, repo_root, out_dir, sf, target_triple), shard_files))
+        obj_files = list(
+            ex.map(lambda sf: _compile_obj(mojo_bin, repo_root, out_dir, sf, target_triple, opt_level), shard_files)
+        )
 
-    cmd = [mojo_bin, "build"]
+    cmd = [mojo_bin, "build", "-O", str(opt_level)]
     if target_triple:
         cmd.extend(["--target-triple", target_triple])
     cmd.extend(["-I", str(repo_root), "-I", str(out_dir), str(out_dir / "main.mojo")])
@@ -224,18 +321,21 @@ def compile_sharded_shared_lib(
     *,
     target_triple: str = "aarch64-unknown-linux-android26",
     jobs: int | None = None,
+    opt_level: int = 3,
 ) -> Path:
     """Compile all shards + main.mojo to Android `.o` objects in parallel and link 16KB-aligned `.so`."""
     src_files = sorted(out_dir.glob("shard_*.mojo")) + [out_dir / "main.mojo"]
     workers = max(1, jobs or min(len(src_files), os.cpu_count() or 2))
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        obj_files = list(ex.map(lambda sf: _compile_obj(mojo_bin, repo_root, out_dir, sf, target_triple), src_files))
+        obj_files = list(
+            ex.map(lambda sf: _compile_obj(mojo_bin, repo_root, out_dir, sf, target_triple, opt_level), src_files)
+        )
 
     so_path.parent.mkdir(parents=True, exist_ok=True)
     link_cmd = [
         ndk_clang,
         "-shared",
-        "-O2",
+        f"-O{min(2, max(0, opt_level))}",
         "-Wl,-z,max-page-size=16384",
         "-Wl,--export-dynamic",
         *[str(o) for o in obj_files],
