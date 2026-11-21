@@ -43,7 +43,6 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
 public final class LauncherActivity extends Activity {
-    private static final int REQ_PICK_SO = 4001;
     private static final int REQ_EXPORT_REPORTS = 4002;
 
     private LauncherConfig config;
@@ -61,7 +60,6 @@ public final class LauncherActivity extends Activity {
     private TextView engineModeBadge;
     private Button mainPlayBtn;
 
-    private TextView extLibStatusText;
     private TextView probeOutputText;
     private TextView logOutputText;
     private TextView crashOutputText;
@@ -342,21 +340,14 @@ public final class LauncherActivity extends Activity {
         pickVerBtn.setLayoutParams(new LinearLayout.LayoutParams(0, dp(40), 1f));
         pickVerBtn.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { openVersionPicker(); } });
 
-        Button forceDlBtn = makeStyledBtn("%100 Yeniden İndir", 0xFF0F766E, 0xFF2DD4BF);
+        Button forceDlBtn = makeStyledBtn("%100 Doğrula / İndir", 0xFF0F766E, 0xFF2DD4BF);
         LinearLayout.LayoutParams dlLp = new LinearLayout.LayoutParams(0, dp(40), 1f);
-        dlLp.leftMargin = dp(6);
+        dlLp.leftMargin = dp(8);
         forceDlBtn.setLayoutParams(dlLp);
         forceDlBtn.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { runFullInstallAndLaunch(false); } });
 
-        Button importSoBtn = makeStyledBtn(".so Motor Ekle", COL_SURFACE, COL_BORDER);
-        LinearLayout.LayoutParams soLp = new LinearLayout.LayoutParams(0, dp(40), 1f);
-        soLp.leftMargin = dp(6);
-        importSoBtn.setLayoutParams(soLp);
-        importSoBtn.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { launchSoPicker(); } });
-
         modeBtns.addView(pickVerBtn);
         modeBtns.addView(forceDlBtn);
-        modeBtns.addView(importSoBtn);
         modeCard.addView(modeBtns);
         page.addView(modeCard);
 
@@ -417,20 +408,19 @@ public final class LauncherActivity extends Activity {
             }
         }
         boolean jarOk = config.clientJarPath != null && new File(config.clientJarPath).isFile();
-        boolean resOk = new File(config.resourcesDir, "assets").isDirectory();
+        boolean resOk = new File(config.resourcesDir, "assets/minecraft/textures/block").isDirectory();
         boolean assetsOk = new File(config.assetsDir, "indexes").isDirectory();
         boolean libsOk = config.librariesRoot().isDirectory() && !config.completeVersionStamp.isEmpty();
-        boolean extOk = config.extLibPath != null && !config.extLibPath.isEmpty() && new File(config.extLibPath).isFile();
         boolean mojoNativeOk = NativeBridge.isLoaded();
 
         if (checklistText != null) {
             checklistText.setText(String.format(Locale.US,
-                    "[%s] Sürüm JAR: %s\n[%s] Java Kütüphaneleri\n[%s] Asset Paketi (Ses/Doku)\n[%s] Kaynaklar Açık (resources/)\n[%s] Mojo 1.2 Çekirdek (%s)",
+                    "[%s] Sürüm JAR: %s\n[%s] Java Kütüphaneleri\n[%s] Asset Paketi (Ses/Doku)\n[%s] Doku Atlası & Kaynaklar (resources/)\n[%s] Mojo 1.2 Multi-Core Chunk Motoru",
                     jarOk ? "✓" : " ", config.selectedVersion,
                     libsOk ? "✓" : " ",
                     assetsOk ? "✓" : " ",
                     resOk ? "✓" : " ",
-                    mojoNativeOk ? "✓" : "!", extOk ? new File(config.extLibPath).getName() : "Yerleşik Mojo Native"));
+                    mojoNativeOk ? "✓" : "!"));
         }
         if (engineModeBadge != null) {
             if (config.isSetupComplete()) {
@@ -520,12 +510,6 @@ public final class LauncherActivity extends Activity {
 
                     config.selectedVersion = res.versionId;
                     config.clientJarPath = res.clientJar.getAbsolutePath();
-
-                    if (config.extLibUrl != null && !config.extLibUrl.trim().isEmpty()) {
-                        File dstSo = config.getNativeImportTarget();
-                        MojangDownloader.downloadDirectSo(config.extLibUrl.trim(), dstSo, pl);
-                        config.extLibPath = dstSo.getAbsolutePath();
-                    }
 
                     EngineResources.prepare(LauncherActivity.this, config, new EngineResources.Progress() {
                         @Override public void status(final String message) {
@@ -710,43 +694,6 @@ public final class LauncherActivity extends Activity {
             }
         });
         page.addView(gfxCard);
-
-        LinearLayout extCard = makeCard("HARİCİ MOJO MOTORU (.so) & URL İNDİRİCİ");
-        extLibStatusText = new TextView(this);
-        extLibStatusText.setTextColor(COL_TEXT); extLibStatusText.setTextSize(12f);
-        refreshExtLibLabel();
-        extCard.addView(extLibStatusText);
-
-        final EditText urlEt = new EditText(this);
-        urlEt.setText(config.extLibUrl);
-        urlEt.setHint("Opsiyonel: libminecraft_muffin.so direkt URL");
-        urlEt.setHintTextColor(COL_MUTED); urlEt.setTextColor(COL_TEXT); urlEt.setTextSize(11.5f);
-        urlEt.setBackground(roundedBox(COL_BG, COL_BORDER, 8)); urlEt.setPadding(dp(8), dp(7), dp(8), dp(7));
-        extCard.addView(urlEt);
-
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL); row.setPadding(0, dp(8), 0, 0);
-        Button saveUrlBtn = makeStyledBtn("URL Kaydet", 0xFF0C4A6E, COL_MOJO);
-        saveUrlBtn.setLayoutParams(new LinearLayout.LayoutParams(0, dp(38), 1f));
-        saveUrlBtn.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View v) {
-                config.extLibUrl = urlEt.getText().toString().trim(); config.save();
-                Toast.makeText(LauncherActivity.this, "Motor URL kaydedildi.", Toast.LENGTH_SHORT).show();
-            }
-        });
-        Button pickBtn = makeStyledBtn("Dosyadan Seç", COL_SURFACE, COL_BORDER);
-        LinearLayout.LayoutParams plp = new LinearLayout.LayoutParams(0, dp(38), 1f); plp.leftMargin = dp(6);
-        pickBtn.setLayoutParams(plp);
-        pickBtn.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { launchSoPicker(); } });
-        Button clrBtn = makeStyledBtn("Yerleşik Mojo'ya Dön", COL_SURFACE, COL_BORDER);
-        LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(0, dp(38), 1f); clp.leftMargin = dp(6);
-        clrBtn.setLayoutParams(clp);
-        clrBtn.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View v) { config.extLibPath = ""; config.save(); refreshExtLibLabel(); }
-        });
-        row.addView(saveUrlBtn); row.addView(pickBtn); row.addView(clrBtn);
-        extCard.addView(row);
-        page.addView(extCard);
     }
 
     private void buildSystemTab(LinearLayout page) {
@@ -839,23 +786,6 @@ public final class LauncherActivity extends Activity {
         parent.addView(seek);
     }
 
-    private void refreshExtLibLabel() {
-        if (extLibStatusText == null) return;
-        if (config.extLibPath == null || config.extLibPath.isEmpty()) {
-            extLibStatusText.setText("Yerleşik Mojo 1.2 Native Çekirdek aktif.");
-        } else {
-            File f = new File(config.extLibPath);
-            extLibStatusText.setText("Harici Motor: " + f.getName() + (f.isFile() ? " ✓" : " (Bulunamadı)"));
-        }
-    }
-
-    private void launchSoPicker() {
-        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-        intent.addCategory(Intent.CATEGORY_OPENABLE);
-        intent.setType("*/*");
-        startActivityForResult(intent, REQ_PICK_SO);
-    }
-
     private void startReportExport() {
         Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
@@ -879,18 +809,6 @@ public final class LauncherActivity extends Activity {
                 }
                 Toast.makeText(this, "Rapor kaydedildi.", Toast.LENGTH_SHORT).show();
             } catch (Throwable t) { Toast.makeText(this, "Hata: " + t.getMessage(), Toast.LENGTH_LONG).show(); }
-            return;
-        }
-        if (requestCode == REQ_PICK_SO && resultCode == RESULT_OK && data != null && data.getData() != null) {
-            File dst = config.getNativeImportTarget();
-            try (InputStream in = getContentResolver().openInputStream(data.getData()); FileOutputStream out = new FileOutputStream(dst)) {
-                byte[] buf = new byte[16384]; int n;
-                while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
-                dst.setReadable(true, false); dst.setExecutable(true, false);
-                config.extLibPath = dst.getAbsolutePath(); config.save();
-                refreshExtLibLabel(); validateAndRefreshUi(config.username);
-                Toast.makeText(this, "Harici .so motoru içe aktarıldı.", Toast.LENGTH_SHORT).show();
-            } catch (Exception e) { Toast.makeText(this, "Kopyalama hatası: " + e.getMessage(), Toast.LENGTH_LONG).show(); }
         }
     }
 }

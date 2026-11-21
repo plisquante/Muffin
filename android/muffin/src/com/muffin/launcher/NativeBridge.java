@@ -75,5 +75,7 @@ public final class NativeBridge {
     public static native void nativeSetCursorMode(boolean cursorVisible, float normX, float normY);
     public static native void nativeUpdateRuntimeConfig(float sensitivity, boolean invertY, float fovDeg, int renderDist, int targetFps);
     public static native void nativePollTelemetry(long[] out16);
+    public static native void nativeUploadBlockAtlas(byte[] rgba, int width, int height);
+    public static native int nativePollSoundEvent();
     public static native String nativeGetLastLog();
 }

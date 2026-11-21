@@ -243,6 +243,7 @@ def emit_shared_module(hierarchy: Hierarchy, stats: CodegenStats | None = None) 
             w(f"    raw[].f_{safe_ident(fl.mojo_name)} = {mdef}")
         w("    return JRef(raw.unsafe_bitcast[ObjHeader]())")
         w("")
+        w("@always_inline")
         w(f"def {new_a_fn}(_s: JStaticsPtr) -> JRef:")
         w(f"    var raw = alloc_arena_obj[{sname}](_s[].arena)")
         w(f"    raw[].hdr = ObjHeader({ci.class_id}, FLAG_ARENA)")
@@ -340,6 +341,20 @@ def _emit_method(
         param_bind.append((loc_idx, k))
         loc_idx += 2 if pt.is_wide else 1
 
+    op_count = sum(len(blk.stmts) for blk in ir.blocks.values())
+    is_recursive = any(
+        st.op == "call" and st.args[1:4] == (ir.owner, ir.name, ir.descriptor)
+        for blk in ir.blocks.values()
+        for st in blk.stmts
+    )
+    if (
+        not opt.has_loop
+        and op_count <= 20
+        and not is_recursive
+        and ir.name not in ("main", "<clinit>")
+        and stats.current_shard is None
+    ):
+        w("@always_inline")
     ret_mojo = "None" if ir.ret_type.is_void else kind_to_mojo(jtype_to_kind(ir.ret_type))
     w(f"def {fn_name}({', '.join(sig_params)}) raises JThrowable -> {ret_mojo}:")
 

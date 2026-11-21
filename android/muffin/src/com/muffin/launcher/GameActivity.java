@@ -31,6 +31,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     private SurfaceView surfaceView;
     private TouchOverlayView overlayView;
     private EditText hiddenImeInput;
+    private SoundEngine soundEngine;
     private boolean engineInitialized = false;
     private int initStatus = 0;
 
@@ -42,8 +43,16 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
                 try {
                     NativeBridge.nativePollTelemetry(telemetryBuf);
                     if (overlayView != null) overlayView.updateTelemetry(telemetryBuf);
+                    if (soundEngine != null) {
+                        for (int i = 0; i < 6; i++) {
+                            int ev = NativeBridge.nativePollSoundEvent();
+                            if (ev == 0) break;
+                            if ((ev & 0x10000) != 0) soundEngine.playPlace();
+                            else if ((ev & 0xFF) > 0) soundEngine.playBreak(ev & 0xFF);
+                        }
+                    }
                 } catch (Throwable ignored) {}
-                mainHandler.postDelayed(this, 250);
+                mainHandler.postDelayed(this, 100);
             }
         }
     };
@@ -77,7 +86,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
 
         try {
             initStatus = NativeBridge.nativeInitEngine(
-                    config.username, config.extLibPath, config.gameDir,
+                    config.username, "", config.gameDir,
                     config.resourcesDir, config.assetsDir, config.backendMode,
                     config.powerProfile, config.renderDistance, config.targetFps, config.fovDeg);
             engineInitialized = true;
@@ -86,18 +95,32 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             return;
         }
 
-        boolean extRequested = config.extLibPath != null && !config.extLibPath.trim().isEmpty();
-        if (initStatus < 0 || (extRequested && initStatus != 1)) {
+        if (initStatus < 0) {
             String detail = NativeBridge.safeGetLastLog();
             NativeBridge.nativeShutdown();
             engineInitialized = false;
-            showFatalInitDialog("Harici Motor (.so) Başlatılamadı",
-                    "Dosya: " + config.extLibPath + "\nHata kodu: " + initStatus + "\nDetay: " + detail);
+            showFatalInitDialog("Mojo Motoru Başlatılamadı",
+                    "Hata kodu: " + initStatus + "\nDetay: " + detail);
             return;
         }
 
         NativeBridge.nativeUpdateRuntimeConfig(
                 config.sensitivity, config.invertY, config.fovDeg, config.renderDistance, config.targetFps);
+
+        final String resDir = config.resourcesDir;
+        new Thread(new Runnable() {
+            @Override public void run() {
+                try {
+                    byte[] rgba = BlockAtlas.buildAtlasRgba(resDir);
+                    if (rgba != null && engineInitialized && NativeBridge.isLoaded()) {
+                        NativeBridge.nativeUploadBlockAtlas(rgba, BlockAtlas.ATLAS_PX, BlockAtlas.ATLAS_PX);
+                    }
+                } catch (Throwable ignored) {}
+            }
+        }, "muffin-atlas-loader").start();
+
+        soundEngine = new SoundEngine();
+        soundEngine.initAsync(config.assetsDir);
 
         FrameLayout root = new FrameLayout(this);
         root.setBackgroundColor(0xFF000000);
@@ -119,9 +142,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         overlayView = new TouchOverlayView(this, config, activeProfile);
         String verTag = (config.selectedVersion != null && !config.selectedVersion.isEmpty())
                 ? config.selectedVersion : "Mojo 1.2";
-        overlayView.setEngineModeLabel(initStatus == 1
-                ? ("Harici Motor (" + new java.io.File(config.extLibPath).getName() + ")")
-                : ("Mojo 1.2 Native Engine • " + verTag));
+        overlayView.setEngineModeLabel("Mojo 1.2 Chunk Engine • " + verTag);
         overlayView.setHostCallbacks(new TouchOverlayView.HostCallbacks() {
             @Override public void onOpenQuickMenu() { showQuickMenu(); }
             @Override public void onToggleSoftKeyboard() { toggleKeyboard(); }
@@ -142,11 +163,6 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
                 .setTitle(title).setMessage(message).setCancelable(false)
                 .setPositiveButton("Başlatıcıya Dön", new DialogInterface.OnClickListener() {
                     @Override public void onClick(DialogInterface dialog, int which) { finish(); }
-                })
-                .setNeutralButton("Yerleşik Mojo Motorla Başlat", new DialogInterface.OnClickListener() {
-                    @Override public void onClick(DialogInterface dialog, int which) {
-                        config.extLibPath = ""; config.save(); recreate();
-                    }
                 }).show();
     }
 
@@ -221,6 +237,10 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     @Override
     protected void onDestroy() {
         mainHandler.removeCallbacks(telemetryTick);
+        if (soundEngine != null) {
+            soundEngine.release();
+            soundEngine = null;
+        }
         if (engineInitialized && NativeBridge.isLoaded()) {
             NativeBridge.nativeShutdown();
             engineInitialized = false;
@@ -268,7 +288,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
 
     private void showQuickMenu() {
         if (overlayView != null) overlayView.releaseAllInputs();
-        String modeStr = (initStatus == 1) ? "Harici Motor (.so)" : "Mojo 1.2 Native";
+        String modeStr = "Mojo 1.2 Chunk Engine";
         String[] items = new String[] {
             (overlayView != null && overlayView.isShowF3Hud()) ? "F3 Mojo Telemetry Gizle" : "F3 Mojo Telemetry Göster",
             "Kontrol Profilini Değiştir (" + config.activeProfileName + ")",

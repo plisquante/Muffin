@@ -53,8 +53,12 @@ class MuffinApkTest(unittest.TestCase):
                         "mc_mojo_init",
                         "mc_mojo_tick_frame",
                         "mc_mojo_shutdown",
+                        "mc_mojo_terrain_height",
+                        "mc_mojo_cull_chunks",
                         "Java_com_muffin_launcher_NativeBridge_nativeInitEngine",
                         "Java_com_muffin_launcher_NativeBridge_nativeProbeHardware",
+                        "Java_com_muffin_launcher_NativeBridge_nativeUploadBlockAtlas",
+                        "Java_com_muffin_launcher_NativeBridge_nativePollSoundEvent",
                         "mc_android_init_egl",
                         "tc_android_init_egl",
                     ):
