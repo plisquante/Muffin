@@ -1,13 +1,15 @@
 """
-Whole-program Class Hierarchy Analysis (CHA), O(1) subtype intervals, and
-closed-world devirtualization planner.
+Whole-program Class Hierarchy Analysis (CHA), O(1) subtype intervals +
+interface membership sets, and closed-world devirtualization planner.
 
-Instead of fat JVM-style vtable/itable lookup chains at runtime:
-1. Every concrete & abstract class gets a DFS pre-order interval `[id, max_sub_id]`,
-   so `x instanceof C` compiles to `lo <= x.class_id() <= hi` (2 integer compares).
-2. Under closed-world assumption, any `invokevirtual` / `invokeinterface` whose
-   receiver hierarchy contains only ONE concrete implementation is devirtualized
-   to a direct static call (`Devirtualization` pass).
+Improvements over naive vtable/itable dispatch:
+1. Class `instanceof` / `checkcast` compiles to a 2-compare DFS interval
+   `lo <= cid <= hi`.
+2. Interface `instanceof` / `checkcast` uses precomputed concrete `class_id`
+   membership (`interface_impls[iface]`) — no runtime linear itable scan.
+3. Closed-world devirtualization (optionally tightened by RTA `instantiated`)
+   converts single-target `invokevirtual` / `invokeinterface` sites into
+   direct static calls that LLVM can inline across classes.
 """
 
 from __future__ import annotations
@@ -15,7 +17,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass, field
 
-from .classfile import ACC_ABSTRACT, ClassFile, Member
+from .classfile import ACC_ABSTRACT, ClassFile
 
 
 @dataclass(slots=True)
@@ -33,9 +35,10 @@ class ClassInfo:
     class_id: int = -1
     max_sub_id: int = -1
     super_id: int = -1
-    all_fields: list[FieldLayout] = field(default_factory=list)  # instance fields in layout order
+    all_fields: list[FieldLayout] = field(default_factory=list)
     static_fields: list[FieldLayout] = field(default_factory=list)
-    vtable: list[tuple[str, str, str, str]] = field(default_factory=list)  # (name, desc, impl_owner, impl_desc)
+    all_interfaces: set[str] = field(default_factory=set)
+    vtable: list[tuple[str, str, str, str]] = field(default_factory=list)
     vtable_index: dict[tuple[str, str], int] = field(default_factory=dict)
 
 
@@ -44,11 +47,17 @@ class Hierarchy:
     classes: dict[str, ClassInfo]
     children: dict[str, list[str]]
     implementors: dict[str, list[str]]
-    # (target_owner, name, desc) -> single concrete impl owner if devirtualizable
+    interface_impl_ids: dict[str, list[int]] = field(default_factory=dict)
+    instantiated: set[str] | None = None
     devirt_cache: dict[tuple[str, str, str], str | None] = field(default_factory=dict)
 
     @classmethod
-    def build(cls, class_files: list[ClassFile]) -> "Hierarchy":
+    def build(
+        cls,
+        class_files: list[ClassFile],
+        *,
+        instantiated: set[str] | None = None,
+    ) -> "Hierarchy":
         classes = {cf.name: ClassInfo(cf=cf) for cf in class_files}
         children: dict[str, list[str]] = defaultdict(list)
         implementors: dict[str, list[str]] = defaultdict(list)
@@ -59,13 +68,19 @@ class Hierarchy:
             for iface in cf.interfaces:
                 implementors[iface].append(cf.name)
 
-        h = cls(classes=classes, children=children, implementors=implementors)
+        h = cls(
+            classes=classes,
+            children=children,
+            implementors=implementors,
+            instantiated=instantiated,
+        )
         h._assign_dfs_ids()
         h._compute_layouts()
+        h._compute_interface_impl_ids()
         return h
 
     def _assign_dfs_ids(self) -> None:
-        next_id = 10  # 0..9 reserved for runtime builtins (JString, primitives, arrays)
+        next_id = 10  # 0..9 reserved for runtime builtins
         roots = [
             name
             for name, ci in self.classes.items()
@@ -97,6 +112,7 @@ class Hierarchy:
             inst_fields: list[FieldLayout] = []
             vtable: list[tuple[str, str, str, str]] = []
             vmap: dict[tuple[str, str], int] = {}
+            all_ifaces: set[str] = set(ci.cf.interfaces)
 
             if sup and sup in self.classes:
                 build_one(sup)
@@ -104,6 +120,12 @@ class Hierarchy:
                 inst_fields.extend(sci.all_fields)
                 vtable.extend(sci.vtable)
                 vmap.update(sci.vtable_index)
+                all_ifaces.update(sci.all_interfaces)
+
+            for iface in list(ci.cf.interfaces):
+                if iface in self.classes:
+                    build_one(iface)
+                    all_ifaces.update(self.classes[iface].all_interfaces)
 
             used_names = {fl.mojo_name for fl in inst_fields}
             for f in ci.cf.fields:
@@ -132,9 +154,21 @@ class Hierarchy:
             ci.all_fields = inst_fields
             ci.vtable = vtable
             ci.vtable_index = vmap
+            ci.all_interfaces = all_ifaces
 
         for name in self.classes:
             build_one(name)
+
+    def _compute_interface_impl_ids(self) -> None:
+        impls: dict[str, list[int]] = defaultdict(list)
+        for name, ci in self.classes.items():
+            if ci.cf.is_interface or (ci.cf.access & ACC_ABSTRACT):
+                continue
+            for iface in ci.all_interfaces:
+                impls[iface].append(ci.class_id)
+        for k in impls:
+            impls[k].sort()
+        self.interface_impl_ids = dict(impls)
 
     def _subtypes(self, root: str) -> list[str]:
         out: list[str] = []
@@ -151,43 +185,92 @@ class Hierarchy:
             stack.extend(self.implementors.get(cur, ()))
         return out
 
-    def resolve_devirtualized(self, owner: str, name: str, desc: str) -> str | None:
-        """If exactly one concrete method implementation exists in `owner`'s
-        closed-world subtype cone, return its defining class; else None."""
-        key = (owner, name, desc)
-        if key in self.devirt_cache:
-            return self.devirt_cache[key]
-
+    def concrete_targets(self, owner: str, name: str, desc: str) -> list[tuple[int, str]]:
+        """Return list of (concrete_class_id, impl_owner) for dispatch."""
         if owner not in self.classes:
-            self.devirt_cache[key] = None
-            return None
-
-        concrete_impls: set[str] = set()
+            return []
+        out: list[tuple[int, str]] = []
         for sub in self._subtypes(owner):
             ci = self.classes[sub]
             if ci.cf.is_interface or (ci.cf.access & ACC_ABSTRACT):
                 continue
-            # Walk up from sub to find nearest concrete implementation
-            cur: str | None = sub
-            while cur and cur in self.classes:
-                cci = self.classes[cur]
-                if any(
-                    not m.is_static()
-                    and not (m.access & ACC_ABSTRACT)
-                    and m.name == name
-                    and m.descriptor == desc
-                    for m in cci.cf.methods
-                ):
-                    concrete_impls.add(cur)
-                    break
-                cur = cci.cf.super_name
+            if self.instantiated is not None and sub not in self.instantiated:
+                continue
+            impl = self._find_impl(sub, name, desc)
+            if impl is not None:
+                out.append((ci.class_id, impl))
+        out.sort()
+        return out
 
-        res = next(iter(concrete_impls)) if len(concrete_impls) == 1 else None
+    def _find_impl(self, concrete_cls: str, name: str, desc: str) -> str | None:
+        cur: str | None = concrete_cls
+        while cur and cur in self.classes:
+            cci = self.classes[cur]
+            if any(
+                not mm.is_static()
+                and not (mm.access & ACC_ABSTRACT)
+                and mm.name == name
+                and mm.descriptor == desc
+                for mm in cci.cf.methods
+            ):
+                return cur
+            cur = cci.cf.super_name
+        # Default interface method fallback
+        stk = list(self.classes[concrete_cls].all_interfaces)
+        seen: set[str] = set()
+        while stk:
+            ic = stk.pop()
+            if ic in seen or ic not in self.classes:
+                continue
+            seen.add(ic)
+            ici = self.classes[ic]
+            if any(
+                not mm.is_static()
+                and not (mm.access & ACC_ABSTRACT)
+                and mm.name == name
+                and mm.descriptor == desc
+                for mm in ici.cf.methods
+            ):
+                return ic
+            stk.extend(ici.cf.interfaces)
+        return None
+
+    def resolve_method(self, owner: str, name: str, desc: str) -> str | None:
+        """Resolve a declared/inherited method (including static/special) up the hierarchy."""
+        cur: str | None = owner
+        while cur and cur in self.classes:
+            cci = self.classes[cur]
+            if any(mm.name == name and mm.descriptor == desc and mm.code is not None for mm in cci.cf.methods):
+                return cur
+            cur = cci.cf.super_name
+        # Check superinterfaces for default methods
+        if owner in self.classes:
+            stk = list(self.classes[owner].all_interfaces)
+            seen: set[str] = set()
+            while stk:
+                ic = stk.pop()
+                if ic in seen or ic not in self.classes:
+                    continue
+                seen.add(ic)
+                ici = self.classes[ic]
+                if any(mm.name == name and mm.descriptor == desc and mm.code is not None for mm in ici.cf.methods):
+                    return ic
+                stk.extend(ici.cf.interfaces)
+        return None
+
+    def resolve_devirtualized(self, owner: str, name: str, desc: str) -> str | None:
+        """If only one concrete implementation exists in `owner`'s cone, return it."""
+        key = (owner, name, desc)
+        if key in self.devirt_cache:
+            return self.devirt_cache[key]
+
+        targets = self.concrete_targets(owner, name, desc)
+        impls = {impl for _, impl in targets}
+        res = next(iter(impls)) if len(impls) == 1 else None
         self.devirt_cache[key] = res
         return res
 
     def devirtualization_stats(self) -> tuple[int, int]:
-        """Count (total virtual/interface methods in known classes, devirtualizable)."""
         total = devirt = 0
         for name, ci in self.classes.items():
             for m in ci.cf.methods:

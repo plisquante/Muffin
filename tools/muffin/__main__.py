@@ -86,6 +86,7 @@ def cmd_translate(args: argparse.Namespace) -> int:
     from .classfile import parse_class
     from .codegen_mojo import emit_mojo_program
     from .hierarchy import Hierarchy
+    from .indy import IndyDesugarer
 
     src = Path(args.input) if args.input else _default_jar()
     cfs = []
@@ -101,6 +102,12 @@ def cmd_translate(args: argparse.Namespace) -> int:
                 if prefixes and not n.startswith(prefixes):
                     continue
                 cfs.append(parse_class(z.read(n)))
+
+    des = IndyDesugarer()
+    for cf in cfs:
+        des.rewrite_class(cf)
+    cfs.extend(des.synthetic_classes)
+
     h = Hierarchy.build(cfs)
     entry = args.entry.replace(".", "/") if args.entry else None
     code, stats = emit_mojo_program(h, entry_class=entry)
@@ -109,8 +116,32 @@ def cmd_translate(args: argparse.Namespace) -> int:
     out_path.write_text(code)
     print(
         f"[muffin] emitted {out_path}: {stats.classes_emitted} classes, "
-        f"{stats.methods_emitted} methods, {stats.calls_devirtualized} devirt / "
-        f"{stats.calls_virtual} virtual calls"
+        f"{stats.methods_emitted} methods ({stats.structured_methods} structured, "
+        f"{stats.dispatch_methods} dispatch), {stats.arena_allocs_lowered} EA arena allocs, "
+        f"{stats.calls_devirtualized} devirt / {stats.calls_virtual} virtual calls"
+    )
+    return 0
+
+
+def cmd_rta(args: argparse.Namespace) -> int:
+    """Run closed-world Rapid Type Analysis across client.jar + libraries + JDK."""
+    from .classpath import ClassPath
+    from .rta import run_rta
+
+    jar = Path(args.jar) if args.jar else _default_jar()
+    libs = sorted(str(p) for p in (WORK / "libraries").rglob("*.jar"))
+    entries: list[str] = [str(jar), *libs]
+    jmod = Path("/usr/lib/jvm/java-21-openjdk-amd64/jmods/java.base.jmod")
+    boot_start = len(entries)
+    if jmod.exists():
+        entries.append(str(jmod))
+    cp = ClassPath(entries, boot_start=boot_start)
+    res = run_rta(cp, args.entry)
+    print(
+        f"[muffin] RTA from {args.entry}: loaded={len(res.loaded):,}, "
+        f"instantiated={len(res.instantiated):,}, methods={len(res.reachable_methods):,}, "
+        f"natives={len(res.native_methods):,}, missing={len(res.missing_classes):,}, "
+        f"unsupported_indy={len(res.unsupported_indy)}"
     )
     return 0
 
@@ -129,6 +160,10 @@ def main(argv: list[str] | None = None) -> int:
     d.add_argument("--jar")
     d.add_argument("--code", action="store_true", help="include bytecode")
     d.set_defaults(fn=cmd_dump)
+    r = sub.add_parser("rta", help="closed-world Rapid Type Analysis")
+    r.add_argument("--jar")
+    r.add_argument("--entry", default="net/minecraft/client/main/Main")
+    r.set_defaults(fn=cmd_rta)
     t = sub.add_parser("translate", help="translate a jar or class dir to Mojo 1.2")
     t.add_argument("--input", "-i", help="jar file or directory of .class files (default: current client.jar)")
     t.add_argument("--out", "-o", required=True, help="output .mojo path")

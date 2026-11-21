@@ -266,6 +266,30 @@ def lift_method(cf: ClassFile, m: Member) -> MethodIR:
                     stk.append(a)
                 else:
                     stk.extend((stk[-2], a))
+            elif op == "dup2_x1":
+                a = stk.pop()
+                b = stk.pop()
+                if a.kind in (KIND_J, KIND_D):
+                    stk.extend((a, b, a))
+                else:
+                    c = stk.pop()
+                    stk.extend((b, a, c, b, a))
+            elif op == "dup2_x2":
+                a = stk.pop()
+                b = stk.pop()
+                if a.kind in (KIND_J, KIND_D):
+                    if b.kind in (KIND_J, KIND_D):
+                        stk.extend((a, b, a))
+                    else:
+                        c = stk.pop()
+                        stk.extend((a, c, b, a))
+                else:
+                    c = stk.pop()
+                    if c.kind in (KIND_J, KIND_D):
+                        stk.extend((b, a, c, b, a))
+                    else:
+                        d = stk.pop()
+                        stk.extend((b, a, d, c, b, a))
             elif op == "swap":
                 stk[-1], stk[-2] = stk[-2], stk[-1]
             elif op in (
@@ -390,6 +414,14 @@ def lift_method(cf: ClassFile, m: Member) -> MethodIR:
                 cnt = stk.pop()
                 t = new_temp(KIND_R)
                 stmts.append(Stmt("newarray", t, (args[0], cnt)))
+                stk.append(t)
+            elif op == "multianewarray":
+                can_raise = True
+                cls_desc, ndims = args
+                dim_vals = [stk.pop() for _ in range(ndims)]
+                dim_vals.reverse()
+                t = new_temp(KIND_R)
+                stmts.append(Stmt("multianewarray", t, (cls_desc, tuple(dim_vals))))
                 stk.append(t)
             elif op == "arraylength":
                 can_raise = True

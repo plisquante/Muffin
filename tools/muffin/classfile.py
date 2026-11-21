@@ -80,8 +80,8 @@ def _decode_mutf8(b: bytes) -> str:
         else:
             out.append(chr(((c & 0x0F) << 12) | ((b[i + 1] & 0x3F) << 6) | (b[i + 2] & 0x3F)))
             i += 3
-    # Re-join surrogate pairs produced by CESU-8.
-    return "".join(out).encode("utf-16", "surrogatepass").decode("utf-16")
+    # Re-join surrogate pairs produced by CESU-8 (allow unpaired surrogates).
+    return "".join(out).encode("utf-16", "surrogatepass").decode("utf-16", "surrogatepass")
 
 
 @dataclass(slots=True)
@@ -162,6 +162,7 @@ class Code:
     code: bytes
     handlers: list[ExceptionHandler]
     attributes: dict[str, bytes]
+    insns_override: list[Any] | None = None
 
 
 @dataclass(slots=True)

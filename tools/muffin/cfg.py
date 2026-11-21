@@ -37,7 +37,7 @@ class CFG:
 
 def build_cfg(cf: ClassFile, m: Member) -> CFG:
     assert m.code is not None
-    insns = list(decode(m.code.code, cf.cp))
+    insns = list(m.code.insns_override) if m.code.insns_override is not None else list(decode(m.code.code, cf.cp))
     leaders = {0}
     for h in m.code.handlers:
         leaders.update((h.start_pc, h.end_pc, h.handler_pc))
