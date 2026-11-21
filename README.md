@@ -30,8 +30,10 @@ Muffin; Minecraft: Java Edition'ın resmi `client.jar` dosyasını doğrudan Moj
   - `rta.py`, `hierarchy.py`: Rapid Type Analysis + kapalı-dünya CHA devirtualization + O(1) class/interface tip kontrolü.
   - `cfg.py`, `ir.py`, `optimize.py`, `structurer.py`, `patches.py`: Stack→3-adresli IR, döngü-içi + inter-procedural Escape Analysis, yapılandırılmış döngü kurtarma ve hot math/engine çekirdek yamaları.
   - `codegen_mojo.py`, `shard.py`, `__main__.py`: Mojo 1.2 kod üreticisi, C-ABI çapraz-shard `.o` planlayıcı/derleyici ve CLI.
+- `android/muffin/`: **Minecraft: Mojo Edition** Android Launcher APK kaynakları (`LauncherActivity`, `MojangDownloader` %100 client.jar/libraries/assets indirici, `ControlsEditorActivity`, `GameActivity`, `muffin_core.mojo` + `muffin_android_jni.c`).
+- `releases/Muffin-Minecraft-Mojo-Edition.apk`: İmzalı, 16KB sayfa hizalı, çift ABI (`arm64-v8a` + `x86_64`) hazır Android Launcher APK.
 - `runtime/muffin/`: `core.mojo`, `arena.mojo`, `pool.mojo`, `jdk.mojo`, `simd_math.mojo`, `world_render.mojo`, `rhi.mojo`, `io_zip.mojo`, `al_audio.mojo` — Zero-GC, Multi-Core & Zero-LWJGL Mojo 1.2 çalışma zamanı.
-- `tests/`: HotSpot JVM ile birebir çıktı karşılaştırmalı diferansiyel testler (`test_e2e.py`) ve runtime testleri (`test_runtime.py`).
+- `tests/`: HotSpot JVM ile birebir çıktı karşılaştırmalı diferansiyel testler (`test_e2e.py`), runtime testleri (`test_runtime.py`) ve Android APK testleri (`test_apk.py`).
 
 ## Hızlı Başlangıç
 
@@ -48,7 +50,10 @@ python3 -m tools.muffin rta
 python3 -m tools.muffin translate -o work/out/minecraft_26_3.mojo
 python3 -m tools.muffin translate -o work/out/shards --shards 16
 
-# 4. Diferansiyel testler & HotSpot vs Muffin benchmark
+# 4. Android Launcher APK derle (arm64-v8a + x86_64, Mojo 1.2 + NDK)
+python3 -m tools.muffin apk
+
+# 5. Diferansiyel testler & HotSpot vs Muffin benchmark
 python3 -m unittest discover -s tests -v
 python3 tools/bench_muffin.py
 ```

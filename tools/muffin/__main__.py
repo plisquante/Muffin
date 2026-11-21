@@ -158,6 +158,15 @@ def cmd_rta(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_apk(args: argparse.Namespace) -> int:
+    """Build dual-ABI (arm64-v8a + x86_64) signed Android Launcher APK."""
+    from tools.build_apk import DEFAULT_OUT_APK, build_apk
+
+    out = Path(args.out) if args.out else DEFAULT_OUT_APK
+    build_apk(out.resolve())
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="muffin")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -183,6 +192,9 @@ def main(argv: list[str] | None = None) -> int:
     t.add_argument("--filter", action="append", help="only include classes matching prefix")
     t.add_argument("--shards", type=int, default=1, help="split output into N separately-compiled .mojo shards")
     t.set_defaults(fn=cmd_translate)
+    k = sub.add_parser("apk", help="build dual-ABI Mojo Edition Android Launcher APK")
+    k.add_argument("--out", help="output .apk path (default: releases/Muffin-Minecraft-Mojo-Edition.apk)")
+    k.set_defaults(fn=cmd_apk)
     args = ap.parse_args(argv)
     return args.fn(args)
 
