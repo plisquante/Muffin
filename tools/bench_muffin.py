@@ -37,6 +37,25 @@ final class Pair {
     Pair(int a, int b) { this.a = a; this.b = b; }
 }
 
+final class Vec3d {
+    final double x, y, z;
+    Vec3d(double x, double y, double z) { this.x = x; this.y = y; this.z = z; }
+}
+
+final class Box3d {
+    final double minX, minY, minZ, maxX, maxY, maxZ;
+    Box3d(double minX, double minY, double minZ, double maxX, double maxY, double maxZ) {
+        this.minX = minX; this.minY = minY; this.minZ = minZ;
+        this.maxX = maxX; this.maxY = maxY; this.maxZ = maxZ;
+    }
+    boolean containsVec(Vec3d v) {
+        return v.x >= minX && v.x < maxX && v.y >= minY && v.y < maxY && v.z >= minZ && v.z < maxZ;
+    }
+    boolean overlaps(Box3d o) {
+        return minX < o.maxX && maxX > o.minX && minY < o.maxY && maxY > o.minY && minZ < o.maxZ && maxZ > o.minZ;
+    }
+}
+
 public class Main {
     static long fib(int n) {
         if (n <= 1) return n;
@@ -66,21 +85,98 @@ public class Main {
         return acc;
     }
 
+    static double fade(double t) { return t * t * t * (t * (t * 6.0 - 15.0) + 10.0); }
+    static double lerp(double d, double a, double b) { return a + d * (b - a); }
+
+    static double grad(int hash, double x, double y, double z) {
+        int h = hash & 15;
+        double u = h < 8 ? x : y;
+        double v = h < 4 ? y : (h == 12 || h == 14 ? x : z);
+        return ((h & 1) == 0 ? u : -u) + ((h & 2) == 0 ? v : -v);
+    }
+
+    static long terrainNoiseBench(int cols) {
+        int[] p = new int[512];
+        for (int i = 0; i < 256; i++) {
+            int val = (i * 1103515245 + 12345) & 255;
+            p[i] = val;
+            p[i + 256] = val;
+        }
+        long sum = 0;
+        for (int i = 0; i < cols; i++) {
+            double x = (i & 255) * 0.03125;
+            double y = ((i >>> 8) & 63) * 0.0625;
+            double z = (i >>> 14) * 0.03125;
+            int xi = (int) Math.floor(x);
+            int yi = (int) Math.floor(y);
+            int zi = (int) Math.floor(z);
+            int X = xi & 255, Y = yi & 255, Z = zi & 255;
+            double fx = x - xi, fy = y - yi, fz = z - zi;
+            double u = fade(fx), v = fade(fy), w = fade(fz);
+            int A = p[X] + Y, AA = p[A] + Z, AB = p[A + 1] + Z;
+            int B = p[X + 1] + Y, BA = p[B] + Z, BB = p[B + 1] + Z;
+            double res = lerp(w,
+                lerp(v, lerp(u, grad(p[AA], fx, fy, fz), grad(p[BA], fx - 1, fy, fz)),
+                        lerp(u, grad(p[AB], fx, fy - 1, fz), grad(p[BB], fx - 1, fy - 1, fz))),
+                lerp(v, lerp(u, grad(p[AA + 1], fx, fy, fz - 1), grad(p[BA + 1], fx - 1, fy, fz - 1)),
+                        lerp(u, grad(p[AB + 1], fx, fy - 1, fz - 1), grad(p[BB + 1], fx - 1, fy - 1, fz - 1))));
+            sum += (long) (res * 1024.0);
+        }
+        return sum;
+    }
+
+    static int aabbCollisionBench(int iters) {
+        Box3d player = new Box3d(0.0, 64.0, 0.0, 0.6, 65.8, 0.6);
+        int hits = 0;
+        for (int i = 0; i < iters; i++) {
+            double dx = ((i & 31) - 16) * 0.1;
+            double dy = 64.0 + ((i >>> 5) & 7) * 0.3;
+            double dz = (((i >>> 8) & 31) - 16) * 0.1;
+            Box3d block = new Box3d(dx, dy, dz, dx + 1.0, dy + 1.0, dz + 1.0);
+            Vec3d pt = new Vec3d(dx + 0.5, dy + 0.5, dz + 0.5);
+            if (player.overlaps(block) || player.containsVec(pt)) {
+                hits++;
+            }
+        }
+        return hits;
+    }
+
+    static long bitStorageBench(int ops) {
+        long[] data = new long[512]; // 5-bit packed voxel palette (12 entries/long = 6144 blocks)
+        long acc = 0;
+        for (int i = 0; i < ops; i++) {
+            int idx = i & 4095;
+            int cell = idx / 12;
+            int shift = (idx % 12) * 5;
+            long val = (long) ((i * 7 + 3) & 31);
+            data[cell] = (data[cell] & ~(31L << shift)) | (val << shift);
+            acc += (data[cell] >>> shift) & 31L;
+        }
+        return acc;
+    }
+
     public static void main(String[] args) {
         long t0 = System.nanoTime();
         long f = 0;
-        for (int i = 0; i < 200000; i++) {
-            f += fib(40);
-        }
+        for (int i = 0; i < 200000; i++) f += fib(40);
         long t1 = System.nanoTime();
         int c = callLoop(new Step(7), 20000000);
         long t2 = System.nanoTime();
         int e = eaLoop(2000000);
         long t3 = System.nanoTime();
-        System.out.println("check=" + f + "," + c + "," + e);
+        long n = terrainNoiseBench(300000);
+        long t4 = System.nanoTime();
+        int h = aabbCollisionBench(2000000);
+        long t5 = System.nanoTime();
+        long b = bitStorageBench(4000000);
+        long t6 = System.nanoTime();
+        System.out.println("check=" + f + "," + c + "," + e + "," + n + "," + h + "," + b);
         System.out.println("fib_ms=" + ((t1 - t0) / 1000000L));
         System.out.println("call_ms=" + ((t2 - t1) / 1000000L));
         System.out.println("ea_ms=" + ((t3 - t2) / 1000000L));
+        System.out.println("noise_ms=" + ((t4 - t3) / 1000000L));
+        System.out.println("aabb_ms=" + ((t5 - t4) / 1000000L));
+        System.out.println("bits_ms=" + ((t6 - t5) / 1000000L));
     }
 }
 """

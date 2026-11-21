@@ -8,20 +8,23 @@ Kaynak: `python3 tools/bench_muffin.py`
 
 | Test | OpenJDK 21 HotSpot | Muffin Native (Mojo 1.2) | Açıklama |
 |---|---|---|---|
-| `fib(40) x 200,000` | `9 ms` | **`0 ms`** | Dominator/Natural-loop structurer gerçek `while` döngüsü üretti; LLVM döngüyü tamamen optimize etti |
-| `Op.apply` 20,000,000 çağrı | `50 ms` | **`35 ms`** | Kapalı-dünya CHA devirtualization + `@always_inline` + Mojo `read`-borrow (`0` atomik RC) |
-| `new Pair` 2,000,000 döngü-içi tahsis (EA) | `7 ms` | **`7 ms`** | `@always_inline` + Escape Analysis `new_arena_*` + per-iterasyon `arena.mark()`/`restore()` |
-| **Toplam Wall-Clock** | `0.179 s` | **`0.057 s`** | **3.14x daha hızlı** |
+| `fib(40) x 200,000` | `10 ms` | **`0 ms`** | Dominator/Natural-loop structurer gerçek `while` döngüsü + LLVM |
+| `Op.apply` 20,000,000 çağrı | `46 ms` | **`40 ms`** | Kapalı-dünya CHA devirtualization + `@always_inline` + parametre aliasing |
+| `new Pair` 2,000,000 döngü-içi tahsis (EA) | `7 ms` | **`10 ms`** | Döngü-içi `FrameArena` bump tahsisi + per-iterasyon `arena.mark()`/`restore()` |
+| `terrainNoise` 300,000 3D Perlin sütunu | `65 ms` | **`13 ms`** | **5.0x daha hızlı** (`fade`/`lerp`/`grad` `@always_inline` + sıfır GC dizi erişimi) |
+| `aabbCollision` 2,000,000 `Box3d`/`Vec3d` EA | `32 ms` | **`30 ms`** | CFG-dominance + `compute_non_escaping_params` çok bloklu `FrameArena` EA |
+| `bitStorage` 4,000,000 5-bit voxel paketleme | `22 ms` | **`15 ms`** | Tek unsigned sınır denetimi (`UInt32`) + native bit işlemleri |
+| **Toplam Wall-Clock (6 İş Yükü)** | `0.310 s` | **`0.127 s`** | **2.44x daha hızlı** |
 
 > [!NOTE]
-> `J2ZIG/docs/BENCHMARK.md` içindeki `CallBench` kıyaslamasında Zig derlemesi `while/switch` durum makinesi ve shadow-stack kopyaları yüzünden HotSpot'tan **2.7x–6.8x daha yavaş** kalmıştı. Muffin'de yapılandırılmış döngü kurtarma ([`structurer.py`](file:///home/antigravity/plisquante/Muffin/tools/muffin/structurer.py)) + `@always_inline` ve borç alınan `JRef` parametreler ([`codegen_mojo.py`](file:///home/antigravity/plisquante/Muffin/tools/muffin/codegen_mojo.py)) + **16 byte** sıkıştırılmış [`ObjHeader`](file:///home/antigravity/plisquante/Muffin/runtime/muffin/core.mojo) + `FrameArena` ([`arena.mojo`](file:///home/antigravity/plisquante/Muffin/runtime/muffin/arena.mojo)) ile tüm kıyaslamalarda HotSpot geçilmiştir.
+> `J2ZIG/docs/BENCHMARK.md` içindeki `CallBench` kıyaslamasında Zig derlemesi `while/switch` durum makinesi ve shadow-stack kopyaları yüzünden HotSpot'tan **2.7x–6.8x daha yavaş** kalmıştı. Muffin'de yapılandırılmış döngü kurtarma ([`structurer.py`](file:///home/antigravity/plisquante/Muffin/tools/muffin/structurer.py)), metodlar-arası CFG-dominance Escape Analysis ([`optimize.py`](file:///home/antigravity/plisquante/Muffin/tools/muffin/optimize.py)), `@always_inline` ([`codegen_mojo.py`](file:///home/antigravity/plisquante/Muffin/tools/muffin/codegen_mojo.py)) ve `FrameArena` ([`arena.mojo`](file:///home/antigravity/plisquante/Muffin/runtime/muffin/arena.mojo)) ile 3D Perlin gürültüsü, AABB çarpışma, bit-storage ve sanal çağrılarda HotSpot geçilmiştir.
 
 ## 2. Multi-Core + SIMD Chunk Tick & World Cull ([`pool.mojo`](file:///home/antigravity/plisquante/Muffin/runtime/muffin/pool.mojo), [`world_render.mojo`](file:///home/antigravity/plisquante/Muffin/runtime/muffin/world_render.mojo))
 
 - **Chunk Tick İş Yükü**: `2,048` adet 16×16×16 chunk bölümü (`8,388,608` blok adımı), 8-wide `SIMD[DType.int32, 8]`
-  - **Tek Çekirdek**: `1 ms` | **Çoklu Çekirdek (`2 CPU`, [`WorkerPool`](file:///home/antigravity/plisquante/Muffin/runtime/muffin/pool.mojo))**: **`1 ms`**, `check_ok=True`
+  - **Tek Çekirdek**: `1 ms` | **Çoklu Çekirdek (`2 CPU`, [`WorkerPool`](file:///home/antigravity/plisquante/Muffin/runtime/muffin/pool.mojo))**: **`0 ms`**, `check_ok=True`
 - **3 Aşamalı Multi-Core Frustum / Portal / LOD Culling ([`cull_sections_parallel`](file:///home/antigravity/plisquante/Muffin/runtime/muffin/world_render.mojo))**:
-  - `16,384` chunk bölümü üzerinde paralel SIMD frustum + LOD taraması: ortalama **`256 µs/pass`** (`0.256 ms`, `visible=16384`)
+  - `16,384` chunk bölümü üzerinde paralel SIMD frustum + LOD taraması: ortalama **`271 µs/pass`** (`0.271 ms`, `visible=16384`)
 - **Doğrudan Sistem Sürücüsü Köprüleri (Zero-LWJGL / Zero-JNI)**:
   - [`probe_rhi_caps`](file:///home/antigravity/plisquante/Muffin/runtime/muffin/rhi.mojo): `vulkan=True` (`libvulkan.so.1`), `gl=True` (`libGL.so.1`)
   - [`ZlibCodec`](file:///home/antigravity/plisquante/Muffin/runtime/muffin/io_zip.mojo): `zlib_ok=True` (doğrudan `libz.so.1` CRC32/Adler32/deflate/inflate)

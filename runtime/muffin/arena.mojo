@@ -82,11 +82,12 @@ struct FrameArena:
             return
         var cp = m.chunk.unsafe_value()
         cp[].used = m.used
-        var nxt = cp[].next
-        while nxt:
-            nxt.unsafe_value()[].used = 0
-            nxt = nxt.unsafe_value()[].next
-        self.current = m.chunk
+        if cp[].next:
+            var nxt = cp[].next
+            while nxt:
+                nxt.unsafe_value()[].used = 0
+                nxt = nxt.unsafe_value()[].next
+            self.current = m.chunk
 
     @always_inline
     def reset(mut self):

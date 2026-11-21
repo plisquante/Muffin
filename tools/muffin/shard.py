@@ -29,7 +29,7 @@ from .codegen_mojo import (
 )
 from .hierarchy import ClassInfo, Hierarchy
 from .ir import MethodIR, lift_method
-from .optimize import compute_non_escaping_methods, optimize_method
+from .optimize import compute_non_escaping_params, optimize_method
 from .structurer import DispatchNode, structure_method
 from .types import mangle_method
 
@@ -93,7 +93,7 @@ def emit_sharded_project(
                 lifted_by_shard[s_idx].append((ci, m, ir))
                 all_irs.append(ir)
 
-    non_escaping_recv = compute_non_escaping_methods(all_irs)
+    non_escaping_params = compute_non_escaping_params(all_irs)
 
     # 4. Emit each shard_XX.mojo
     shard_paths: list[Path] = []
@@ -107,7 +107,7 @@ def emit_sharded_project(
         w(shared_import)
         w("")
         for ci, m, ir in lifted_by_shard[s_idx]:
-            opt = optimize_method(ir, non_escaping_recv=non_escaping_recv)
+            opt = optimize_method(ir, non_escaping_params=non_escaping_params)
             ast = structure_method(ir)
             stats.methods_emitted += 1
             if isinstance(ast, DispatchNode):

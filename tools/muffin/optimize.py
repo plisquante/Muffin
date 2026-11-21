@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .cfg import CFG, build_cfg, dominators
+from .cfg import _dominates
 from .ir import MethodIR, Stmt, Val
 
 
@@ -130,69 +130,116 @@ def _has_side_effect(st: Stmt) -> bool:
     )
 
 
-def compute_non_escaping_methods(irs: list[MethodIR]) -> set[tuple[str, str, str]]:
-    """Find methods whose receiver `arg0` (`l0_R`) never escapes to heap/return/unknown calls."""
+def compute_non_escaping_params(irs: list[MethodIR]) -> dict[tuple[str, str, str], set[int]]:
+    """Find parameter positions (0=receiver, 1..N=args) per method that never escape."""
+    from .ir import KIND_R, jtype_to_kind
+
     by_key = {(ir.owner, ir.name, ir.descriptor): ir for ir in irs}
-    safe: set[tuple[str, str, str]] = {("java/lang/Object", "<init>", "()V")}
+    safe: dict[tuple[str, str, str], set[int]] = {
+        ("java/lang/Object", "<init>", "()V"): {0},
+    }
+
+    # Precompute param slots -> arg index for every method
+    param_slots: dict[tuple[str, str, str], list[tuple[int, str]]] = {}
+    for key, ir in by_key.items():
+        slots: list[tuple[int, str]] = []
+        loc = 0
+        if not ir.is_static:
+            slots.append((0, "l0_R"))
+            loc = 1
+        arg_pos = loc
+        for pt in ir.params:
+            if jtype_to_kind(pt) == KIND_R:
+                slots.append((arg_pos, f"l{loc}_R"))
+            arg_pos += 1
+            loc += 2 if pt.is_wide else 1
+        param_slots[key] = slots
+        if slots:
+            safe.setdefault(key, {p for p, _ in slots})
 
     changed = True
     while changed:
         changed = False
         for key, ir in by_key.items():
-            if key in safe or ir.is_static:
+            slots = param_slots.get(key)
+            if not slots:
                 continue
-            aliases: dict[str, set[str]] = {"l0_R": {"l0_R"}}
-            escaped = False
+            cur_safe = safe[key]
+            if not cur_safe:
+                continue
+
+            taint: dict[str, set[int]] = {lname: {apos} for apos, lname in slots if apos in cur_safe}
+            local_changed = True
+            while local_changed:
+                local_changed = False
+                for blk in ir.blocks.values():
+                    for st in blk.stmts:
+                        op, dst, a = st.op, st.dst, st.args
+                        if dst is None:
+                            continue
+                        new_t: set[int] = set()
+                        if op == "copy":
+                            new_t = set(taint.get(a[0].name, ()))
+                        elif op == "checkcast":
+                            new_t = set(taint.get(a[1].name, ()))
+                        prev = taint.get(dst.name, set())
+                        if new_t and not new_t.issubset(prev):
+                            taint[dst.name] = prev | new_t
+                            local_changed = True
+
+            escaped: set[int] = set()
             for blk in ir.blocks.values():
                 for st in blk.stmts:
-                    op, dst, a = st.op, st.dst, st.args
-                    if op == "copy" and dst is not None:
-                        if "l0_R" in aliases.get(a[0].name, ()):
-                            aliases.setdefault(dst.name, set()).add("l0_R")
-                    elif op == "checkcast" and dst is not None:
-                        if "l0_R" in aliases.get(a[1].name, ()):
-                            aliases.setdefault(dst.name, set()).add("l0_R")
-                    elif op == "putstatic":
-                        if "l0_R" in aliases.get(a[3].name, ()):
-                            escaped = True
+                    op, a = st.op, st.args
+                    if op == "putstatic":
+                        escaped.update(taint.get(a[3].name, ()))
                     elif op == "putfield":
-                        if "l0_R" in aliases.get(a[4].name, ()):
-                            escaped = True
+                        escaped.update(taint.get(a[4].name, ()))
                     elif op == "astore_elem" and a[0] == "a":
-                        if "l0_R" in aliases.get(a[3].name, ()):
-                            escaped = True
+                        escaped.update(taint.get(a[3].name, ()))
                     elif op == "call":
-                        _, own, mn, md, recv, cargs = a
-                        if recv is not None and "l0_R" in aliases.get(recv.name, ()):
-                            if (own, mn, md) not in safe:
-                                escaped = True
-                        for ca in cargs:
-                            if "l0_R" in aliases.get(ca.name, ()):
-                                escaped = True
+                        cop, own, mn, md, recv, cargs = a
+                        csafe = safe.get((own, mn, md), ())
+                        if recv is not None and 0 not in csafe:
+                            escaped.update(taint.get(recv.name, ()))
+                        off = 0 if cop == "invokestatic" else 1
+                        for idx, ca in enumerate(cargs):
+                            if (off + idx) not in csafe:
+                                escaped.update(taint.get(ca.name, ()))
                     elif op == "indy":
                         for ca in a[3]:
-                            if "l0_R" in aliases.get(ca.name, ()):
-                                escaped = True
+                            escaped.update(taint.get(ca.name, ()))
                 if blk.term is not None:
                     if blk.term.op == "ret" and blk.term.args:
-                        if "l0_R" in aliases.get(blk.term.args[0].name, ()):
-                            escaped = True
+                        escaped.update(taint.get(blk.term.args[0].name, ()))
                     elif blk.term.op == "throw":
-                        if "l0_R" in aliases.get(blk.term.args[0].name, ()):
-                            escaped = True
-            if not escaped:
-                safe.add(key)
+                        escaped.update(taint.get(blk.term.args[0].name, ()))
+
+            new_safe = cur_safe - escaped
+            if new_safe != cur_safe:
+                safe[key] = new_safe
                 changed = True
     return safe
+
+
+def compute_non_escaping_methods(irs: list[MethodIR]) -> set[tuple[str, str, str]]:
+    """Backward-compatible wrapper returning methods whose receiver `arg0` never escapes."""
+    return {k for k, ps in compute_non_escaping_params(irs).items() if 0 in ps}
 
 
 def optimize_method(
     ir: MethodIR,
     *,
     non_escaping_recv: set[tuple[str, str, str]] | None = None,
+    non_escaping_params: dict[tuple[str, str, str], set[int]] | None = None,
 ) -> OptInfo:
     """Run copy propagation, dead-temp elimination, and escape analysis on `ir`."""
-    safe_recv = non_escaping_recv or {("java/lang/Object", "<init>", "()V")}
+    if non_escaping_params is not None:
+        safe_params = non_escaping_params
+    elif non_escaping_recv is not None:
+        safe_params = {k: {0} for k in non_escaping_recv}
+    else:
+        safe_params = {("java/lang/Object", "<init>", "()V"): {0}}
     # 1. Intra-block copy propagation for single-use temps `t*`
     for blk in ir.blocks.values():
         copy_map: dict[str, Val] = {}
@@ -260,38 +307,61 @@ def optimize_method(
                 break
 
     arena_allocs: set[str] = set()
-    # Global intra-method EA (safe when loop-free) OR block-local EA (safe even inside loops)
+    # Global intra-method EA (safe when loop-free) OR CFG-dominance EA (safe across loop branches)
     alloc_sites: set[str] = set()
     alloc_block: dict[str, int] = {}
+    alloc_stmt_idx: dict[str, int] = {}
     aliases: dict[str, set[str]] = {}
+    alias_vars: dict[str, set[str]] = {}
+    write_blocks: dict[str, set[int]] = {}
+    first_read_in_blk: dict[tuple[int, str], int] = {}
+    write_in_blk: dict[tuple[int, str], int] = {}
     escaped_vars: set[str] = set()
     alias_blocks: dict[str, set[int]] = {}
 
     def origins(name: str) -> set[str]:
         return aliases.get(name, {name})
 
-    def record_use(v: Val, bpc: int) -> None:
+    def record_use(v: Val, bpc: int, stmt_i: int) -> None:
+        if (bpc, v.name) not in first_read_in_blk:
+            first_read_in_blk[(bpc, v.name)] = stmt_i
         for org in origins(v.name):
             alias_blocks.setdefault(org, set()).add(bpc)
 
+    def record_write(dst_name: str, bpc: int, stmt_i: int) -> None:
+        write_blocks.setdefault(dst_name, set()).add(bpc)
+        if (bpc, dst_name) not in write_in_blk:
+            write_in_blk[(bpc, dst_name)] = stmt_i
+
     for bpc, blk in ir.blocks.items():
-        for st in blk.stmts:
+        for si, st in enumerate(blk.stmts):
             for v in _stmt_reads(st):
-                record_use(v, bpc)
+                record_use(v, bpc, si)
             if st.op in ("new", "newarray") and st.dst is not None:
                 if st.op == "newarray" or st.args[0] != "java/lang/StringBuilder":
                     alloc_sites.add(st.dst.name)
                     alloc_block[st.dst.name] = bpc
+                    alloc_stmt_idx[st.dst.name] = si
                     aliases[st.dst.name] = {st.dst.name}
+                    alias_vars[st.dst.name] = {st.dst.name}
                     alias_blocks.setdefault(st.dst.name, set()).add(bpc)
+                    record_write(st.dst.name, bpc, si)
             elif st.op == "copy" and st.dst is not None:
-                aliases[st.dst.name] = set(origins(st.args[0].name))
-                for org in aliases[st.dst.name]:
+                orgs = set(origins(st.args[0].name))
+                aliases[st.dst.name] = orgs
+                record_write(st.dst.name, bpc, si)
+                for org in orgs:
                     alias_blocks.setdefault(org, set()).add(bpc)
+                    if org in alias_vars:
+                        alias_vars[org].add(st.dst.name)
             elif st.op == "checkcast" and st.dst is not None:
-                aliases[st.dst.name] = set(origins(st.args[1].name))
-                for org in aliases[st.dst.name]:
+                orgs = set(origins(st.args[1].name))
+                aliases[st.dst.name] = orgs
+                record_write(st.dst.name, bpc, si)
+                for org in orgs:
                     alias_blocks.setdefault(org, set()).add(bpc)
+                    if org in alias_vars:
+                        alias_vars[org].add(st.dst.name)
             elif st.op == "putstatic":
                 escaped_vars.update(origins(st.args[3].name))
             elif st.op == "putfield":
@@ -299,18 +369,26 @@ def optimize_method(
             elif st.op == "astore_elem" and st.args[0] == "a":
                 escaped_vars.update(origins(st.args[3].name))
             elif st.op == "call":
-                _, owner, mname, mdesc, recv, cargs = st.args
-                if recv is not None:
-                    if (owner, mname, mdesc) not in safe_recv:
-                        escaped_vars.update(origins(recv.name))
-                for ca in cargs:
-                    escaped_vars.update(origins(ca.name))
+                cop, owner, mname, mdesc, recv, cargs = st.args
+                csafe = safe_params.get((owner, mname, mdesc), ())
+                if recv is not None and 0 not in csafe:
+                    escaped_vars.update(origins(recv.name))
+                off = 0 if cop == "invokestatic" else 1
+                for idx, ca in enumerate(cargs):
+                    if (off + idx) not in csafe:
+                        escaped_vars.update(origins(ca.name))
+                if st.dst is not None:
+                    record_write(st.dst.name, bpc, si)
             elif st.op == "indy":
                 for ca in st.args[3]:
                     escaped_vars.update(origins(ca.name))
+                if st.dst is not None:
+                    record_write(st.dst.name, bpc, si)
+            elif st.dst is not None:
+                record_write(st.dst.name, bpc, si)
         if blk.term is not None:
             for v in _stmt_reads(blk.term):
-                record_use(v, bpc)
+                record_use(v, bpc, len(blk.stmts))
             if blk.term.op == "ret" and blk.term.args:
                 escaped_vars.update(origins(blk.term.args[0].name))
             elif blk.term.op == "throw":
@@ -320,9 +398,92 @@ def optimize_method(
     if not has_loop:
         arena_allocs = candidates
     else:
-        # Inside looping methods, keep allocations whose entire lifetime stays in a single basic block
-        arena_allocs = {
-            s for s in candidates if alias_blocks.get(s, set()) == {alloc_block[s]}
-        }
+        idom = _ir_idom(ir)
+        arena_allocs = set()
+        for s in candidates:
+            ab = alloc_block[s]
+            ublks = alias_blocks.get(s, set())
+            if not ublks or ab not in idom or not all(u in idom and _dominates(idom, ab, u) for u in ublks):
+                continue
+            # Ensure every alias variable holding `s` is unconditionally defined inside `ab`
+            # before any read of that variable in `ab`.
+            safe_vars = True
+            for vn in alias_vars.get(s, ()):
+                wblks = write_blocks.get(vn, set())
+                if wblks != {ab}:
+                    safe_vars = False
+                    break
+                widx = write_in_blk.get((ab, vn), -1)
+                ridx = first_read_in_blk.get((ab, vn), 1_000_000)
+                if widx < 0 or ridx < widx:
+                    safe_vars = False
+                    break
+            if safe_vars:
+                arena_allocs.add(s)
 
     return OptInfo(arena_allocs=arena_allocs, live_vars=live, has_loop=has_loop)
+
+
+def _ir_idom(ir: MethodIR) -> dict[int, int]:
+    """Compute immediate dominators directly over lifted `MethodIR.blocks`."""
+    blocks = ir.blocks
+    succs: dict[int, list[int]] = {pc: [] for pc in blocks}
+    preds: dict[int, list[int]] = {pc: [] for pc in blocks}
+    for pc, blk in blocks.items():
+        if blk.term is None:
+            continue
+        op, args = blk.term.op, blk.term.args
+        tlist: list[int] = []
+        if op == "goto":
+            tlist = [args[0]]
+        elif op == "if1":
+            tlist = [args[3], args[2]]
+        elif op == "if2":
+            tlist = [args[4], args[3]]
+        elif op == "switch":
+            tlist = sorted({args[1], *args[2].values()})
+        succs[pc] = [t for t in tlist if t in blocks]
+        for t in succs[pc]:
+            preds[t].append(pc)
+
+    seen: set[int] = {ir.entry}
+    rpo: list[int] = []
+    stk: list[tuple[int, int]] = [(ir.entry, 0)]
+    while stk:
+        u, i = stk[-1]
+        sl = succs.get(u, ())
+        if i < len(sl):
+            stk[-1] = (u, i + 1)
+            v = sl[i]
+            if v not in seen:
+                seen.add(v)
+                stk.append((v, 0))
+        else:
+            stk.pop()
+            rpo.append(u)
+    rpo.reverse()
+    rpo_idx = {n: i for i, n in enumerate(rpo)}
+    idom: dict[int, int] = {ir.entry: ir.entry}
+
+    def intersect(a: int, b: int) -> int:
+        while a != b:
+            while rpo_idx[a] > rpo_idx[b]:
+                a = idom[a]
+            while rpo_idx[b] > rpo_idx[a]:
+                b = idom[b]
+        return a
+
+    changed = True
+    while changed:
+        changed = False
+        for n in rpo[1:]:
+            ps = [p for p in preds.get(n, ()) if p in idom]
+            if not ps:
+                continue
+            new = ps[0]
+            for p in ps[1:]:
+                new = intersect(p, new)
+            if idom.get(n) != new:
+                idom[n] = new
+                changed = True
+    return idom

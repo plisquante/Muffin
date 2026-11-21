@@ -288,7 +288,7 @@ def array_len[T: Copyable & Deinitable](ref_obj: JRef) raises JThrowable -> Int3
 def array_get[T: Copyable & Deinitable](ref_obj: JRef, idx: Int32) raises JThrowable -> T:
     var hdr = ref_obj.non_null()
     var ap = hdr.unsafe_bitcast[JArrayData[T]]()
-    if idx < 0 or idx >= ap[].length:
+    if UInt32(idx) >= UInt32(ap[].length):
         raise JThrowable(4, "java/lang/ArrayIndexOutOfBoundsException")
     return ap[].data.unsafe_value().unsafe_offset(Int(idx))[].copy()
 
@@ -297,7 +297,7 @@ def array_get[T: Copyable & Deinitable](ref_obj: JRef, idx: Int32) raises JThrow
 def array_set[T: Copyable & Deinitable](ref_obj: JRef, idx: Int32, var val: T) raises JThrowable:
     var hdr = ref_obj.non_null()
     var ap = hdr.unsafe_bitcast[JArrayData[T]]()
-    if idx < 0 or idx >= ap[].length:
+    if UInt32(idx) >= UInt32(ap[].length):
         raise JThrowable(4, "java/lang/ArrayIndexOutOfBoundsException")
     var slot = ap[].data.unsafe_value().unsafe_offset(Int(idx))
     slot.unsafe_deinit_pointee()

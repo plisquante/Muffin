@@ -33,7 +33,7 @@ from .ir import (
     kind_to_mojo,
     lift_method,
 )
-from .optimize import OptInfo, compute_non_escaping_methods, optimize_method
+from .optimize import OptInfo, compute_non_escaping_params, optimize_method
 from .structurer import (
     BlockNode,
     BreakNode,
@@ -276,10 +276,10 @@ def emit_mojo_program(
                 continue
             lifted_list.append((ci, m, lift_method(ci.cf, m)))
 
-    non_escaping_recv = compute_non_escaping_methods([ir for _, _, ir in lifted_list])
+    non_escaping_params = compute_non_escaping_params([ir for _, _, ir in lifted_list])
 
     for ci, m, ir in lifted_list:
-        opt = optimize_method(ir, non_escaping_recv=non_escaping_recv)
+        opt = optimize_method(ir, non_escaping_params=non_escaping_params)
         ast = structure_method(ir)
         stats.methods_emitted += 1
         if isinstance(ast, DispatchNode):
@@ -349,7 +349,7 @@ def _emit_method(
     )
     if (
         not opt.has_loop
-        and op_count <= 20
+        and op_count <= 45
         and not is_recursive
         and ir.name not in ("main", "<clinit>")
         and stats.current_shard is None
@@ -365,24 +365,26 @@ def _emit_method(
         w(f"    return {patch.mojo_expr}")
         return
 
-    # Check which parameter JRef locals are read-only (never overwritten by astore/copy)
+    # Check which parameter locals are read-only (never overwritten by store or iinc)
     written_locals: set[str] = set()
     for blk in ir.blocks.values():
         for st in blk.stmts:
             if st.dst is not None:
                 written_locals.add(st.dst.name)
+            elif st.op == "iinc":
+                written_locals.add(st.args[0].name)
 
-    param_aliases: dict[str, str] = {}
+    param_aliases: dict[str, tuple[str, str]] = {}
     p_cursor = 0
     if not ir.is_static:
         lv = ir.locals_used[(0, KIND_R)]
         if lv.name not in written_locals:
-            param_aliases[lv.name] = "arg0"
+            param_aliases[lv.name] = ("arg0", KIND_R)
         p_cursor = 1
     for i, (lidx, k) in enumerate(param_bind[p_cursor:]):
         lv = ir.locals_used[(lidx, k)]
-        if k == KIND_R and lv.name not in written_locals:
-            param_aliases[lv.name] = f"p{i}"
+        if lv.name not in written_locals:
+            param_aliases[lv.name] = (f"p{i}", k)
 
     # Declare only live non-aliased variables
     declared: set[str] = set()
@@ -432,6 +434,20 @@ def _emit_method(
         w("        _s[].arena.restore(_amark)")
 
 
+def _ast_has_arena_alloc(node: object, arena_allocs: set[str]) -> bool:
+    if not arena_allocs:
+        return False
+    if isinstance(node, BlockNode):
+        return any(st.dst is not None and st.dst.name in arena_allocs for st in node.block.stmts)
+    if isinstance(node, SeqNode):
+        return any(_ast_has_arena_alloc(item, arena_allocs) for item in node.items)
+    if isinstance(node, WhileNode):
+        return _ast_has_arena_alloc(node.body, arena_allocs)
+    if isinstance(node, IfNode):
+        return _ast_has_arena_alloc(node.then_node, arena_allocs) or _ast_has_arena_alloc(node.else_node, arena_allocs)
+    return False
+
+
 def _emit_ast(
     out: list[str],
     ind: str,
@@ -453,7 +469,7 @@ def _emit_ast(
         w(f"{ind}break")
     elif isinstance(node, WhileNode):
         w(f"{ind}while True:")
-        if opt.has_loop and opt.arena_allocs:
+        if opt.has_loop and _ast_has_arena_alloc(node.body, opt.arena_allocs):
             w(f"{ind}    var _lmark = _s[].arena.mark()")
             w(f"{ind}    try:")
             _emit_ast(out, ind + "        ", hierarchy, ci, node.body, opt, stats)
@@ -1143,10 +1159,10 @@ def emit_cross_trampoline(out: list[str], ir: MethodIR) -> None:
     w("")
 
 
-def _apply_param_aliases(ir: MethodIR, aliases: dict[str, str]) -> None:
+def _apply_param_aliases(ir: MethodIR, aliases: dict[str, tuple[str, str]]) -> None:
     from .optimize import _replace_reads
 
-    repl = {k: Val(v, KIND_R) for k, v in aliases.items()}
+    repl = {k: Val(vname, vkind) for k, (vname, vkind) in aliases.items()}
     for blk in ir.blocks.values():
         for st in blk.stmts:
             _replace_reads(st, repl)
